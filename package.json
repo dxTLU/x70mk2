@@ -1,0 +1,15 @@
+{
+  "name": "x70mk2-proxy",
+  "version": "1.0.0",
+  "description": "Self-hosted rewriting web proxy with a Varnish (VCL) front end",
+  "main": "server.js",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node --test test/*.test.js"
+  }
+}

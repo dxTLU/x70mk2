@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Web Proxy</title>
+<link rel="icon" href="/favicon.ico" type="image/svg+xml">
+<style>
+  :root {
+    --bg: #f6f7fb; --card: #ffffff; --text: #16181d; --muted: #5d6474; --border: #dde1ea;
+    --accent: #3b5bdb; --accent-text: #ffffff; --chip: #eef1f8; --danger: #c92a2a;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --card: #171a21; --text: #e8eaf0; --muted: #9aa3b5; --border: #2a2f3a;
+      --accent: #748ffc; --accent-text: #0f1115; --chip: #20242d; --danger: #ff8787;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
+    display: flex; flex-direction: column; align-items: center; padding: 12vh 16px 48px;
+  }
+  main { width: 100%; max-width: 680px; }
+  h1 { font-size: 28px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; display: flex; align-items: center; gap: 10px; }
+  h1 svg { width: 30px; height: 30px; }
+  p.sub { margin: 0 0 24px; color: var(--muted); }
+  form { display: flex; gap: 8px; }
+  input[type=text] {
+    flex: 1; min-width: 0; font: inherit; padding: 14px 16px; border-radius: 12px;
+    border: 1px solid var(--border); background: var(--card); color: var(--text); outline: none;
+  }
+  input[type=text]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
+  button {
+    font: inherit; font-weight: 600; padding: 0 20px; border-radius: 12px; border: 0;
+    background: var(--accent); color: var(--accent-text); cursor: pointer;
+  }
+  button:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 40%, transparent); }
+  section { margin-top: 32px; }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chips a {
+    text-decoration: none; color: var(--text); background: var(--chip); border: 1px solid var(--border);
+    padding: 6px 12px; border-radius: 999px; font-size: 14px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .chips a:hover { border-color: var(--accent); }
+  .row { display: flex; justify-content: space-between; align-items: center; }
+  .link-btn { background: none; color: var(--muted); padding: 0; font-weight: 500; font-size: 13px; }
+  .link-btn:hover { color: var(--danger); }
+  footer { margin-top: 40px; color: var(--muted); font-size: 13px; }
+  footer code { background: var(--chip); padding: 1px 6px; border-radius: 6px; }
+  .empty { color: var(--muted); font-size: 14px; }
+  #status { min-height: 20px; color: var(--muted); font-size: 13px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>
+    <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M3 16h26M16 3c4 4 5.5 8.5 5.5 13S20 25 16 29c-4-4-5.5-8.5-5.5-13S12 7 16 3z" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>
+    Web Proxy
+  </h1>
+  <p class="sub">Enter a web address or search terms.</p>
+  <form id="go" action="/__proxy/go" method="get" autocomplete="off">
+    <input id="url" name="url" type="text" placeholder="example.com or search…" autofocus spellcheck="false" autocapitalize="off" aria-label="Address or search">
+    <button type="submit">Go</button>
+  </form>
+  <div id="status" role="status"></div>
+
+  <section>
+    <h2>Quick links</h2>
+    <div class="chips" id="quick"></div>
+  </section>
+
+  <section>
+    <div class="row"><h2>Recent</h2><button class="link-btn" id="clear-history" type="button">Clear history</button></div>
+    <div class="chips" id="recent"></div>
+  </section>
+
+  <section>
+    <div class="row"><h2>Session</h2></div>
+    <button class="link-btn" id="clear-cookies" type="button">Sign out everywhere (clear proxied cookies)</button>
+  </section>
+
+  <footer>Pages are fetched by this server and rewritten so every link, image, script and request stays inside the proxy. Direct links work too: <code>/p/https://example.com/</code></footer>
+</main>
+<script>
+(function () {
+  var QUICK = [
+    ['Wikipedia', 'https://en.wikipedia.org/'], ['DuckDuckGo', 'https://duckduckgo.com/'],
+    ['Google', 'https://www.google.com/'], ['YouTube', 'https://www.youtube.com/'],
+    ['Reddit', 'https://old.reddit.com/'], ['GitHub', 'https://github.com/'],
+    ['Hacker News', 'https://news.ycombinator.com/'], ['BBC News', 'https://www.bbc.com/news'],
+  ];
+  var KEY = 'proxy:history';
+  function load() { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch (e) { return []; } }
+  function save(h) { try { localStorage.setItem(KEY, JSON.stringify(h.slice(0, 20))); } catch (e) {} }
+  function chip(label, url) {
+    var a = document.createElement('a');
+    a.href = '/p/' + url; a.textContent = label; a.title = url;
+    return a;
+  }
+  var quick = document.getElementById('quick');
+  QUICK.forEach(function (q) { quick.appendChild(chip(q[0], q[1])); });
+
+  function renderRecent() {
+    var el = document.getElementById('recent');
+    el.textContent = '';
+    var h = load();
+    if (!h.length) { var s = document.createElement('span'); s.className = 'empty'; s.textContent = 'Nothing yet.'; el.appendChild(s); return; }
+    h.forEach(function (u) {
+      var label = u;
+      try { var x = new URL(u); label = x.hostname.replace(/^www\./, '') + (x.pathname.length > 1 ? x.pathname : ''); } catch (e) {}
+      el.appendChild(chip(label, u));
+    });
+  }
+  renderRecent();
+
+  function normalise(s) {
+    s = s.trim();
+    if (!s) return null;
+    if (/^https?:\/\//i.test(s)) return s;
+    if (!/\s/.test(s) && (/^[^\s\/?#]+\.[^\s\/?#]{2,}([\/?#]\S*)?$/.test(s) || /^localhost(:\d+)?/i.test(s))) return 'https://' + s;
+    return null; // let the server turn it into a search
+  }
+
+  document.getElementById('go').addEventListener('submit', function (e) {
+    var v = document.getElementById('url').value;
+    var u = normalise(v);
+    if (!u) return; // server-side search fallback
+    e.preventDefault();
+    var h = load().filter(function (x) { return x !== u; });
+    h.unshift(u); save(h);
+    location.href = '/p/' + u;
+  });
+  document.getElementById('clear-history').addEventListener('click', function () { save([]); renderRecent(); });
+  document.getElementById('clear-cookies').addEventListener('click', function () {
+    var st = document.getElementById('status');
+    fetch('/__proxy/clear', { method: 'POST' }).then(function (r) {
+      st.textContent = r.ok ? 'All proxied cookies cleared.' : 'Could not clear cookies.';
+    }, function () { st.textContent = 'Could not clear cookies.'; });
+  });
+  var params = new URLSearchParams(location.search);
+  if (params.get('url')) document.getElementById('url').value = params.get('url');
+})();
+</script>
+</body>
+</html>
