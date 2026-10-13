@@ -273,6 +273,7 @@ sub vcl_deliver {
 }
 
 sub vcl_synth {
+    unset resp.http.X-Varnish;
     set resp.http.Content-Type = "text/plain; charset=utf-8";
     set resp.http.Cache-Control = "no-store";
     if (resp.status == 405) {

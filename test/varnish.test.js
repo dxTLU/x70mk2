@@ -124,6 +124,7 @@ describe('Varnish in front of the app', { skip: VARNISHD ? false : 'varnishd is 
   const last = new Map(); // origin path -> last request seen there
   let tmp, origin, originPort, app, appPort, varnish, varnishPort, proxyProtoPort;
   let appLog = '', varnishLog = '';
+  const originSockets = new Set();
   let O; // the fixture origin as seen by the proxy, e.g. http://127.0.0.1:1234
 
   // -- fixture origin ---------------------------------------------------------------------------
@@ -345,8 +346,12 @@ describe('Varnish in front of the app', { skip: VARNISHD ? false : 'varnishd is 
     tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'proxy-varnish-test-'));
     process.on('exit', killAll);
 
-    origin = http.createServer(originHandler);
+    origin = http.createServer({ maxHeaderSize: 256 * 1024 }, originHandler);
     origin.on('upgrade', originUpgrade);
+    origin.on('connection', (socket) => {
+      originSockets.add(socket);
+      socket.on('close', () => originSockets.delete(socket));
+    });
     await new Promise((resolve) => origin.listen(0, '127.0.0.1', resolve));
     originPort = origin.address().port;
     O = `http://127.0.0.1:${originPort}`;
@@ -386,7 +391,8 @@ describe('Varnish in front of the app', { skip: VARNISHD ? false : 'varnishd is 
     await stop(app);
     process.removeListener('exit', killAll);
     if (origin) {
-      origin.closeAllConnections?.();
+      // Upgraded (WebSocket) sockets are not closed by closeAllConnections().
+      for (const socket of originSockets) socket.destroy();
       await new Promise((resolve) => origin.close(resolve));
     }
     if (tmp) fs.rmSync(tmp, { recursive: true, force: true });
