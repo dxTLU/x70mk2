@@ -723,6 +723,33 @@ describe('HTTP semantics', () => {
     assert.strictEqual(r.headers.location, '/p/https://example.com/x?y=1');
   });
 
+  it('survives origins that send invalid or unexpected status lines', async () => {
+    const lines = {
+      '/s099': 'HTTP/1.1 099 Weird\r\nContent-Length: 2\r\n\r\nhi',
+      '/s000': 'HTTP/1.1 000 Zero\r\nContent-Length: 2\r\n\r\nhi',
+      '/s600': 'HTTP/1.1 600 Six\r\nContent-Type: text/html\r\nContent-Length: 18\r\n\r\n<a href="/x">x</a>',
+      '/ctl': 'HTTP/1.1 200 OK\r\nX-Ctl: a\x01b\r\nContent-Length: 2\r\n\r\nhi',
+      '/dupcl': 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\nhi',
+      '/101': 'HTTP/1.1 101 Switching Protocols\r\nUpgrade: foo\r\nConnection: Upgrade\r\n\r\n',
+    };
+    const odd = net.createServer((sock) => sock.once('data', (d) => sock.end(lines[String(d).split(' ')[1]] || 'HTTP/1.1 404 NF\r\n\r\n')));
+    const base = `http://127.0.0.1:${await listen(odd)}`;
+    try {
+      const status = async (p) => (await request(`/p/${base}${p}`)).status;
+      assert.strictEqual(await status('/s099'), 502);
+      assert.strictEqual(await status('/s000'), 502);
+      const six = await request(`/p/${base}/s600`);
+      assert.strictEqual(six.status, 600);
+      assert.ok(six.body.includes(`/p/${base}/x`));
+      assert.strictEqual(await status('/ctl'), 502);
+      assert.strictEqual(await status('/dupcl'), 502);
+      assert.strictEqual(await status('/101'), 502);
+      assert.strictEqual((await request('/__proxy/health')).status, 200, 'the proxy is still up');
+    } finally {
+      odd.close();
+    }
+  });
+
   it('unwraps proxied URLs that point back at the proxy', async () => {
     const r = await request(`/p/${proxyUrl}/p/${siteUrl}/html`);
     assert.strictEqual(r.status, 302);

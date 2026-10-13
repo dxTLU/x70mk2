@@ -119,6 +119,11 @@ function publicOrigin(req) {
   return proto + '://' + String(host).split(',')[0].trim();
 }
 
+/** host[:port] the browser used to reach the proxy, or null if the request names a bogus one. */
+function selfHost(req) {
+  try { return new URL(publicOrigin(req)).host; } catch { return null; }
+}
+
 function isSecureRequest(req) {
   return publicOrigin(req).startsWith('https:');
 }
@@ -198,6 +203,28 @@ function timeoutError(what) {
   return Object.assign(new Error(`The site took too long to ${what}.`), { code: 'ETIMEDOUT' });
 }
 
+/**
+ * Wrap an event callback that writes to `res`: it runs outside handle()'s try/catch, so anything
+ * it throws must end this response instead of the whole process.
+ */
+function guarded(res, fn) {
+  return (...args) => {
+    try {
+      const out = fn(...args);
+      if (out && typeof out.catch === 'function') out.catch((e) => failInternal(res, e));
+      return out;
+    } catch (e) {
+      failInternal(res, e);
+    }
+  };
+}
+
+function failInternal(res, e) {
+  console.error('[proxy] internal error', e);
+  if (!res.headersSent && !res.destroyed) sendError(res, 500, 'Internal error', e.message);
+  else res.destroy();
+}
+
 // ---- authentication -------------------------------------------------------------------
 
 function sameSecret(a, b) {
@@ -240,8 +267,7 @@ function refererTarget(req) {
   if (!ref) return null;
   try {
     const r = new URL(ref);
-    const self = new URL(publicOrigin(req));
-    if (r.host !== self.host) return null;
+    if (r.host !== selfHost(req)) return null;
     return decodeTarget(r.pathname + r.search);
   } catch {
     return null;
@@ -390,7 +416,7 @@ function runPreflight(req, target, ctx, cors, unsafe, cb) {
   for (const k of ['user-agent', 'accept-language', 'sec-fetch-dest']) if (req.headers[k]) headers[k] = req.headers[k];
   if (req.headers['sec-fetch-mode']) headers['sec-fetch-mode'] = 'cors';
   if (req.headers['sec-fetch-site']) headers['sec-fetch-site'] = fetchSiteFor(ctx);
-  const referer = refererFor(ctx.initiator, target);
+  const referer = refererFor(ctx.initiator, target, req.headers['x-proxy-referrer-policy']);
   if (referer) headers.referer = referer;
 
   let up;
@@ -446,13 +472,28 @@ function fetchSiteFor(ctx) {
   return ctx.sameOrigin ? 'same-origin' : ctx.sameSite ? 'same-site' : 'cross-site';
 }
 
-/** Referer per the default policy, strict-origin-when-cross-origin. */
-function refererFor(initiator, target) {
+/**
+ * The Referer a browser would send under `policy` (default strict-origin-when-cross-origin). The
+ * runtime can pass a page's per-request policy as X-Proxy-Referrer-Policy: the browser itself must
+ * keep sending the full proxied Referer so that requests can be attributed.
+ */
+function refererFor(initiator, target, policy) {
   if (!initiator) return null;
   const secure = (u) => u.protocol === 'https:' || u.protocol === 'wss:';
-  if (secure(initiator) && !secure(target)) return null;
-  if (initiator.origin === target.origin) return initiator.origin + initiator.pathname + initiator.search;
-  return initiator.origin + '/';
+  const downgrade = secure(initiator) && !secure(target);
+  const same = initiator.origin === target.origin;
+  const full = initiator.origin + initiator.pathname + initiator.search;
+  const origin = initiator.origin + '/';
+  switch (String(policy || '').toLowerCase()) {
+    case 'no-referrer': return null;
+    case 'no-referrer-when-downgrade': return downgrade ? null : full;
+    case 'origin': return origin;
+    case 'origin-when-cross-origin': return same ? full : origin;
+    case 'same-origin': return same ? full : null;
+    case 'strict-origin': return downgrade ? null : origin;
+    case 'unsafe-url': return full;
+    default: return downgrade ? null : same ? full : origin;
+  }
 }
 
 function buildUpstreamHeaders(req, target, jar, { ctx = requestContext(req, target), cors = null, sendCookies = true } = {}) {
@@ -473,7 +514,7 @@ function buildUpstreamHeaders(req, target, jar, { ctx = requestContext(req, targ
   }
   if (req.expectContinue && requestHasBody(req)) h.expect = '100-continue';
 
-  const referer = refererFor(ctx.initiator, target);
+  const referer = refererFor(ctx.initiator, target, req.headers['x-proxy-referrer-policy']);
   if (referer) h.referer = referer;
   if (req.headers['sec-fetch-site']) h['sec-fetch-site'] = fetchSiteFor(ctx);
 
@@ -852,7 +893,7 @@ function proxyRequest(req, res, target) {
   if (target.protocol === 'wss:') target.protocol = 'https:';
 
   // A proxied URL that points back at the proxy itself: unwrap it instead of looping.
-  if (target.host === new URL(publicOrigin(req)).host) {
+  if (target.host === selfHost(req)) {
     return redirect(res, '/' + (target.pathname + target.search).replace(/^\/+/, ''));
   }
 
@@ -867,11 +908,11 @@ function proxyRequest(req, res, target) {
   if (cors) {
     const unsafe = corsUnsafeHeaders(req);
     if (!CORS_SAFE_METHODS.has(req.method) || unsafe.length) {
-      return runPreflight(req, target, ctx, cors, unsafe, (err) => {
+      return runPreflight(req, target, ctx, cors, unsafe, guarded(res, (err) => {
         if (res.destroyed || res.headersSent) return;
         if (err) return err.cors ? sendCorsError(res, err.message, target) : sendUpstreamError(res, err, target);
         sendUpstream(req, res, target, st, 0);
-      });
+      }));
     }
   }
   sendUpstream(req, res, target, st, 0);
@@ -891,7 +932,7 @@ function sendUpstream(req, res, target, st, attempt) {
 
   upReq.setTimeout(config.upstreamTimeout, () => upReq.destroy(timeoutError('respond')));
 
-  upReq.on('error', (err) => {
+  upReq.on('error', guarded(res, (err) => {
     if (responded) return; // body errors are handled by the response side
     res.removeListener('close', onClientClose);
     if (res.destroyed) return;
@@ -901,7 +942,7 @@ function sendUpstream(req, res, target, st, attempt) {
     }
     if (st.hasBody) { req.unpipe(upReq); req.resume(); }
     sendUpstreamError(res, err, target);
-  });
+  }));
 
   if (req.expectContinue && st.hasBody) {
     // End-to-end 100-continue: tell the client to send its body once the origin agrees, or after
@@ -913,11 +954,18 @@ function sendUpstream(req, res, target, st, attempt) {
     upReq.on('close', () => clearTimeout(fallback));
   }
 
-  upReq.on('response', (upRes) => {
+  // A protocol switch nobody asked for (WebSockets arrive through server.js's 'upgrade' path).
+  upReq.on('upgrade', guarded(res, (upRes, socket) => {
+    responded = true;
+    socket.destroy();
+    sendError(res, 502, 'Bad response from site', 'The site switched to another protocol unexpectedly.', target.href);
+  }));
+
+  upReq.on('response', guarded(res, (upRes) => {
     responded = true;
     upReq.setTimeout(0);
     handleResponse(req, res, target, st, upRes);
-  });
+  }));
 
   if (st.hasBody) {
     // Stream the body (no buffering). A client that gives up mid-upload cancels the upstream request.
@@ -936,6 +984,12 @@ function handleResponse(req, res, target, st, upRes) {
   const status = upRes.statusCode;
   const up = upRes.headers;
   const { jar, ctx, cors } = st;
+  if (!(status >= 200 && status <= 999)) {
+    // 1xx never ends up here (Node handles informational responses itself); anything else
+    // outside the range HTTP allows cannot be relayed.
+    upRes.destroy();
+    return sendError(res, 502, 'Bad response from site', `The site answered with an invalid status code (${status}).`, target.href);
+  }
 
   if (st.sendCookies) {
     const setCookies = up['set-cookie'];
@@ -1053,7 +1107,7 @@ function bufferAndRewrite(req, res, target, st, upRes, kind, responseHeaders, do
   });
   res.on('close', () => { if (!res.writableFinished) upRes.destroy(); });
 
-  upRes.on('end', async () => {
+  upRes.on('end', guarded(res, async () => {
     clearTimeout(idle);
     if (settled) return;
     settled = true;
@@ -1102,13 +1156,8 @@ function bufferAndRewrite(req, res, target, st, upRes, kind, responseHeaders, do
     } else {
       headers['content-type'] = type;
     }
-    try {
-      await finishRewritten(req, res, status, upRes.statusMessage, headers, out, decoded.encoding);
-    } catch (e) {
-      if (!res.headersSent) sendError(res, 500, 'Internal error', e.message, target.href);
-      else res.destroy();
-    }
-  });
+    await finishRewritten(req, res, status, upRes.statusMessage, headers, out, decoded.encoding);
+  }));
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1278,7 +1327,7 @@ async function handle(req, res) {
 }
 
 module.exports = {
-  handle, sessions, sessionFor, buildUpstreamHeaders, refererTarget, publicOrigin, requestContext,
+  handle, sessions, sessionFor, buildUpstreamHeaders, refererTarget, publicOrigin, selfHost, requestContext,
   normaliseInput, parseCookies, authorized, isProxyAuth, clientBundle, rewriteLinkHeader, rewriteRefresh,
   corsUnsafeHeaders, corsCheck, preflightCache, SESSION_COOKIE, LAST_COOKIE,
 };

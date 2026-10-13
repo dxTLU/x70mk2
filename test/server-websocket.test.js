@@ -263,6 +263,16 @@ describe('WebSocket tunnel', () => {
     lost.socket.destroy();
   });
 
+  it('survives malformed handshakes', async () => {
+    for (const extra of [{ Host: 'a b', Origin: 'http://x' }, { Host: 'a b' }, { Origin: '::::' }, { Cookie: '__plast=%E0%A4%A' }]) {
+      const c = await connect(extra.Cookie ? '/stray' : ws(siteUrl, '/chat'), extra);
+      assert.ok(c.status >= 400 || c.status === 101, JSON.stringify(extra));
+      c.socket.destroy();
+    }
+    const alive = await httpGet('/__proxy/health');
+    assert.strictEqual(alive.status, 200);
+  });
+
   it('rejects other upgrades, blocked targets and dead origins', async () => {
     const h2c = await connect(ws(siteUrl, '/chat'), { Upgrade: 'h2c' });
     assert.strictEqual(h2c.status, 400);

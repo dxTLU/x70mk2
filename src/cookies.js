@@ -478,11 +478,12 @@ class Jar {
 }
 
 /**
- * Cookie jars keyed by proxy session id. Jars that never receive a cookie (crawlers, health
- * checks, one-off visits) are dropped after a few idle minutes instead of living for the whole
- * session TTL. Session cookies are persisted too: the proxy is the "browser" here, and a restart
- * should not sign everyone out.
+ * Cookie jars keyed by proxy session id. A jar only becomes a session once it holds a cookie;
+ * until then it waits in a bounded pool, so concurrent first requests of a new visitor share it
+ * while crawlers and health checks that never get a cookie cannot grow memory. Session cookies
+ * are persisted too: the proxy is the "browser" here, and a restart should not sign everyone out.
  */
+const PENDING_MAX = 10000;
 const EMPTY_JAR_TTL_MS = 10 * 60 * 1000;
 
 class SessionStore {
@@ -491,25 +492,37 @@ class SessionStore {
     this.persist = persist;
     this.ttlMs = ttlMs;
     this.jars = new Map();
+    this.pending = new Map();
     this.dirty = false;
-    this.markDirty = () => { this.dirty = true; };
     if (persist) this.load();
   }
 
   static newId() { return crypto.randomBytes(18).toString('base64url'); }
 
+  makeJar(id, data) {
+    return new Jar(data, (jar) => {
+      this.dirty = true;
+      if (jar.size && this.jars.get(id) !== jar) {
+        this.pending.delete(id);
+        this.jars.set(id, jar);
+      }
+    });
+  }
+
   get(id) {
-    let jar = this.jars.get(id);
+    let jar = this.jars.get(id) || this.pending.get(id);
     if (!jar) {
-      jar = new Jar(null, this.markDirty);
-      this.jars.set(id, jar);
+      jar = this.makeJar(id);
+      if (this.pending.size >= PENDING_MAX) this.pending.delete(this.pending.keys().next().value);
+      this.pending.set(id, jar);
     }
     jar.lastUsed = Date.now();
-    this.dirty = true;
+    if (this.jars.has(id)) this.dirty = true;
     return jar;
   }
 
   delete(id) {
+    this.pending.delete(id);
     if (this.jars.delete(id)) this.dirty = true;
   }
 
@@ -517,8 +530,10 @@ class SessionStore {
     const cutoff = now - this.ttlMs;
     const emptyCutoff = now - EMPTY_JAR_TTL_MS;
     for (const [id, jar] of this.jars) {
-      if (jar.lastUsed < cutoff || (jar.size === 0 && jar.lastUsed < emptyCutoff)) this.jars.delete(id);
+      if (jar.lastUsed < cutoff) this.jars.delete(id);
+      else if (jar.size === 0 && jar.lastUsed < emptyCutoff) this.jars.delete(id); // cleared or expired
     }
+    for (const [id, jar] of this.pending) if (jar.lastUsed < emptyCutoff) this.pending.delete(id);
   }
 
   load() {
@@ -531,7 +546,7 @@ class SessionStore {
     }
     if (!data || typeof data !== 'object') return;
     for (const [id, j] of Object.entries(data)) {
-      const jar = new Jar(j, this.markDirty);
+      const jar = this.makeJar(id, j);
       if (jar.size) this.jars.set(id, jar);
     }
     this.sweep();

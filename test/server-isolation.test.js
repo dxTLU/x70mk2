@@ -381,6 +381,23 @@ describe('cross-site isolation', () => {
       assert.strictEqual(h['sec-fetch-site'], 'cross-site');
     });
 
+    it('applies a per-request referrer policy passed by the runtime', () => {
+      const ref = 'http://proxy.test/p/https://a.example/page?q=1';
+      const at = (policy, target) => proxyMod.buildUpstreamHeaders(
+        fakeReq({ referer: ref, 'x-proxy-referrer-policy': policy }), new URL(target), jar).referer;
+      assert.strictEqual(at('no-referrer', 'https://a.example/x'), undefined);
+      assert.strictEqual(at('origin', 'https://a.example/x'), 'https://a.example/');
+      assert.strictEqual(at('same-origin', 'https://b.example/x'), undefined);
+      assert.strictEqual(at('same-origin', 'https://a.example/x'), 'https://a.example/page?q=1');
+      assert.strictEqual(at('unsafe-url', 'http://b.example/x'), 'https://a.example/page?q=1');
+      assert.strictEqual(at('no-referrer-when-downgrade', 'http://b.example/x'), undefined);
+      assert.strictEqual(at('strict-origin', 'https://b.example/x'), 'https://a.example/');
+      assert.strictEqual(at('origin-when-cross-origin', 'https://b.example/x'), 'https://a.example/');
+      assert.strictEqual(at('bogus', 'https://b.example/x'), 'https://a.example/');
+      const h = proxyMod.buildUpstreamHeaders(fakeReq({ referer: ref, 'x-proxy-referrer-policy': 'origin' }), new URL('https://a.example/'), jar);
+      assert.strictEqual(h['x-proxy-referrer-policy'], undefined, 'hints never leave the proxy');
+    });
+
     it('strips URL credentials and fragments from the Referer', () => {
       const h = proxyMod.buildUpstreamHeaders(
         fakeReq({ referer: 'http://proxy.test/p/https://user:pw@a.example/p?q=1' }), new URL('https://a.example/x'), jar);

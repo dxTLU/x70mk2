@@ -62,6 +62,16 @@ function initiatorOrigin(req, target) {
 /** Tunnel a WebSocket upgrade at /p/wss://host/path to the real server. */
 function handleUpgrade(req, socket, head) {
   socket.on('error', () => socket.destroy());
+  // This runs outside the HTTP request handler: an exception here would take the process down.
+  try {
+    tunnel(req, socket, head);
+  } catch (e) {
+    console.error('[proxy] websocket error', e);
+    reject(socket, 500, 'Internal error');
+  }
+}
+
+function tunnel(req, socket, head) {
   if (String(req.headers.upgrade || '').toLowerCase() !== 'websocket') return reject(socket, 400, 'Bad Request');
   if (!proxy.authorized(req)) {
     return reject(socket, 401, 'Authentication required', { 'WWW-Authenticate': 'Basic realm="proxy", charset="UTF-8"' });
@@ -71,7 +81,7 @@ function handleUpgrade(req, socket, head) {
   if (origin && origin !== 'null') {
     let host = null;
     try { host = new URL(origin).host; } catch { /* malformed */ }
-    if (host !== new URL(proxy.publicOrigin(req)).host) return reject(socket, 403, 'Cross-site WebSocket refused');
+    if (!host || host !== proxy.selfHost(req)) return reject(socket, 403, 'Cross-site WebSocket refused');
   }
 
   const target = isProxiedPath(req.url) ? decodeTarget(req.url) : strayTarget(req);
@@ -85,10 +95,11 @@ function handleUpgrade(req, socket, head) {
   const headers = { host: target.host, connection: 'Upgrade', upgrade: 'websocket' };
   for (const k of FORWARD) if (req.headers[k]) headers[k] = req.headers[k];
   headers.origin = initiatorOrigin(req, target);
+  // A socket is a subresource of the page that opens it: cross-site ones only get (and may only
+  // set) SameSite=None cookies.
+  const context = !config.emulateSameSite || siteOf(headers.origin) === siteOf(target) ? 'same-site' : 'cross-site';
   if (jar) {
-    // A socket is a subresource of the page that opens it: cross-site ones only get SameSite=None.
-    const sameSite = !config.emulateSameSite || siteOf(headers.origin) === siteOf(target);
-    const cookie = jar.header(target, { context: sameSite ? 'same-site' : 'cross-site' });
+    const cookie = jar.header(target, { context });
     if (cookie) headers.cookie = cookie;
   }
 
@@ -108,7 +119,7 @@ function handleUpgrade(req, socket, head) {
     socket.removeListener('close', abort);
     upReq.setTimeout(0);
     const setCookies = upRes.headers['set-cookie'];
-    if (jar && setCookies) for (const sc of [].concat(setCookies)) jar.set(sc, target);
+    if (jar && setCookies) for (const sc of [].concat(setCookies)) jar.set(sc, target, { context });
     if (!socket.writable) { upSocket.destroy(); return; }
 
     let resp = 'HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n';
@@ -143,7 +154,7 @@ function handleUpgrade(req, socket, head) {
     socket.removeListener('close', abort);
     upReq.setTimeout(0);
     const setCookies = upRes.headers['set-cookie'];
-    if (jar && setCookies) for (const sc of [].concat(setCookies)) jar.set(sc, target);
+    if (jar && setCookies) for (const sc of [].concat(setCookies)) jar.set(sc, target, { context });
     const chunks = [];
     let size = 0;
     const done = () => {

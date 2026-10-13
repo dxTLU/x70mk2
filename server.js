@@ -56,6 +56,10 @@ function start() {
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  // Last resort: all state is per request, so one failure must not take every user's session
+  // down with it (request handlers already turn their own errors into error pages).
+  process.on('uncaughtException', (e) => console.error('[proxy] uncaught exception', e));
+  process.on('unhandledRejection', (e) => console.error('[proxy] unhandled rejection', e));
 
   server.listen(config.port, config.host, () => {
     const scheme = config.tlsCert ? 'https' : 'http';

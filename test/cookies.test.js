@@ -294,15 +294,13 @@ describe('cookie jar', () => {
     const jar = new Jar();
     const u = U('https://a.example.com/');
     for (let i = 0; i < MAX_PER_DOMAIN; i++) jar.set(`c${i}=1; Domain=example.com; Path=/`, u);
-    jar.cookies.get('c0\u0000example.com\u00000\u0000/').lastAccess = 0;
-    for (const c of jar.cookies.values()) if (c.name !== 'c0') c.lastAccess = Date.now();
-    jar.match(U('https://b.example.com/'));
-    jar.cookies.get('c0\u0000example.com\u00000\u0000/').lastAccess = 0; // least recently used
+    jar.cookies.get('c7\u0000example.com\u00000\u0000/').lastAccess = 0; // least recently used
     jar.set('newest=1; Domain=example.com; Path=/', u);
     assert.strictEqual(jar.size, MAX_PER_DOMAIN);
     const all = names(jar, 'https://example.com/');
     assert.ok(all.includes('newest'));
-    assert.ok(!all.includes('c0'));
+    assert.ok(!all.includes('c7'));
+    assert.ok(all.includes('c0'));
     // Other sites are unaffected.
     jar.set('other=1', U('https://other.org/'));
     assert.strictEqual(jar.size, MAX_PER_DOMAIN + 1);
@@ -371,10 +369,21 @@ describe('session store', () => {
     store.get('empty');
     store.get('old').set('a=1', U('https://example.com/'));
     store.jars.get('old').lastUsed = Date.now() - 7200e3;
+    store.get('cleared').set('a=1', U('https://example.com/'));
+    store.get('cleared').clear();
     store.sweep();
-    assert.deepStrictEqual([...store.jars.keys()].sort(), ['busy', 'empty']);
+    assert.deepStrictEqual([...store.jars.keys()].sort(), ['busy', 'cleared']);
+    assert.deepStrictEqual([...store.pending.keys()], ['empty'], 'cookie-less visitors are not sessions');
     store.sweep(Date.now() + 11 * 60 * 1000);
     assert.deepStrictEqual([...store.jars.keys()], ['busy']);
+    assert.strictEqual(store.pending.size, 0);
+  });
+
+  it('bounds the jars of visitors that never receive a cookie', () => {
+    const store = new SessionStore({ file: '/nonexistent/x.json', persist: false, ttlMs: 3600e3 });
+    for (let i = 0; i < 12000; i++) store.get('crawler-' + i);
+    assert.ok(store.pending.size <= 10000);
+    assert.strictEqual(store.jars.size, 0);
   });
 
   it('shares one jar between concurrent requests of a new session', () => {
