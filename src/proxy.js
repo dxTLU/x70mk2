@@ -500,8 +500,9 @@ function requestHasBody(req) {
 // A rewritten body is a different representation from the upstream one, and it changes whenever
 // the rewriter does. Its validators are therefore tagged with the rewriter version:
 //   "abc"  -> W/"pxs<ver>-abc"     W/"abc" -> W/"pxw<ver>-abc"     (Last-Modified only) -> W/"pxl<ver>-"
-// Incoming validators are translated back; ones from another rewriter version are dropped, so
-// browsers never revalidate a stale rewrite into a 304.
+// Incoming validators are translated back. On cache revalidations (If-None-Match on GET/HEAD)
+// tags from another rewriter version are dropped, so browsers never revalidate a stale rewrite
+// into a 304; preconditions on writes (If-Match, If-None-Match on PUT...) always keep their tag.
 
 const PX_ETAG = /^W\/"px([swl])([0-9a-f]{8})-(.*)"$/;
 
@@ -514,20 +515,23 @@ function versionEtag(etag, lastModified) {
   return lastModified ? `W/"pxl${v}-"` : null;
 }
 
-function translateConditionals(h) {
+function translateConditionals(h, method) {
   const v = clientBundle().rewriteVersion;
   const state = { versioned: false, stale: false };
   for (const name of ['if-none-match', 'if-match', 'if-range']) {
     // Only touch headers that carry one of our tags (If-Range may also hold a date).
     if (h[name] === undefined || !/W\/"px[swl]/.test(String(h[name]))) continue;
+    const revalidation = name === 'if-none-match' && (method === 'GET' || method === 'HEAD');
     const tags = String(h[name]).match(/(?:W\/)?"[^"]*"|\*/g) || [];
     const out = [];
     for (const t of tags) {
       const m = PX_ETAG.exec(t);
       if (!m) { out.push(t); continue; }
       if (name === 'if-range') { state.rangeOverRewrite = true; continue; }
-      if (m[2] !== v) { state.stale = true; continue; }
-      state.versioned = true;
+      if (revalidation) {
+        if (m[2] !== v) { state.stale = true; continue; }
+        state.versioned = true;
+      }
       if (m[1] === 's') out.push(`"${m[3]}"`);
       else if (m[1] === 'w') out.push(`W/"${m[3]}"`);
     }
@@ -602,7 +606,7 @@ const CORS_SAFELISTED_RESPONSE = new Set(['cache-control', 'content-language', '
 // Needed by the browser itself to handle the response, whatever the page may read.
 const TRANSPORT_HEADERS = new Set([
   'content-encoding', 'content-range', 'accept-ranges', 'vary', 'date', 'age', 'etag', 'location',
-  'x-proxied-url', 'x-proxy-private', 'referrer-policy', 'content-disposition',
+  'x-proxied-url', 'x-proxy-private', 'referrer-policy',
 ]);
 
 function filterResponseHeaders(up, target, { rewriting = false, cors = null, versioned = false, status = 200 } = {}) {
@@ -857,7 +861,7 @@ function proxyRequest(req, res, target) {
   const cors = corsContext(req, ctx);
   const sendCookies = credentialsAllowed(req, cors);
   const headers = buildUpstreamHeaders(req, target, jar, { ctx, cors, sendCookies });
-  const cond = translateConditionals(headers);
+  const cond = translateConditionals(headers, req.method);
   const st = { jar, ctx, cors, sendCookies, headers, cond, hasBody: requestHasBody(req) };
 
   if (cors) {
@@ -1004,7 +1008,6 @@ function bufferAndRewrite(req, res, target, st, upRes, kind, responseHeaders, do
 
   const sendRaw = (body) => {
     const h = responseHeaders(false);
-    delete h['content-length'];
     h['content-length'] = body.length;
     writeHeadWithStatus(res, status, upRes.statusMessage, h);
     res.end(body);

@@ -182,6 +182,10 @@ function fixture(req, res) {
     });
     return res.end('ok');
   }
+  if (p === '/clear-site-data') {
+    res.writeHead(200, { 'content-type': 'text/plain', 'clear-site-data': '"cache", "cookies"' });
+    return res.end('cleared');
+  }
   if (p === '/echo') {
     const chunks = [];
     req.on('data', (c) => chunks.push(c));
@@ -344,6 +348,13 @@ describe('HTTP semantics', () => {
     assert.strictEqual(lm2.status, 304);
     assert.strictEqual(seen['/html-lm'].headers['if-none-match'], undefined);
     assert.ok(seen['/html-lm'].headers['if-modified-since']);
+  });
+
+  it('keeps preconditions on writes even across rewriter versions', async () => {
+    await request(`/p/${siteUrl}/echo`, { method: 'PUT', body: 'x', headers: { 'if-match': 'W/"pxs00000000-v1", "other"' } });
+    assert.strictEqual(seen['/echo'].headers['if-match'], '"v1", "other"', 'a lost-update guard is never dropped');
+    await request(`/p/${siteUrl}/echo`, { method: 'PUT', body: 'x', headers: { 'if-none-match': 'W/"pxw00000000-v1"' } });
+    assert.strictEqual(seen['/echo'].headers['if-none-match'], 'W/"v1"');
   });
 
   it('passes other conditional headers through untouched', async () => {
@@ -551,6 +562,15 @@ describe('HTTP semantics', () => {
     assert.strictEqual(echo.headers.cookie, 'a=1; b=2; c=3');
   });
 
+  it('applies Clear-Site-Data: "cookies" to the jar instead of the proxy origin', async () => {
+    const first = await request(`/p/${siteUrl}/cookies3`);
+    const psid = first.headers['set-cookie'].find((c) => c.startsWith('__psid=')).split(';')[0];
+    const r = await request(`/p/${siteUrl}/clear-site-data`, { headers: { cookie: psid } });
+    assert.strictEqual(r.headers['clear-site-data'], undefined, 'it would wipe every proxied site');
+    const echo = JSON.parse((await request(`/p/${siteUrl}/echo`, { headers: { cookie: psid } })).body);
+    assert.strictEqual(echo.headers.cookie, undefined);
+  });
+
   it('keeps non-ASCII header bytes and decodes UTF-8 Location headers', async () => {
     const r = await request(`/p/${siteUrl}/utf8-header`);
     assert.strictEqual(Buffer.from(r.headers['x-name'], 'latin1').toString('utf8'), 'café ✓');
@@ -678,6 +698,29 @@ describe('HTTP semantics', () => {
     assert.ok(doc.body.includes(`/p/${siteUrl}/q`));
     const bin = await request(`/p/${siteUrl}/no-type-bin`, { headers: { 'sec-fetch-dest': 'document' } });
     assert.deepStrictEqual([...bin.buf], [0, 1, 2, 3, 0x89, 0x50]);
+  });
+
+  it('accepts targets with a percent-encoded scheme', async () => {
+    const r = await request(`/p/${encodeURIComponent(siteUrl + '/html')}`);
+    assert.strictEqual(r.status, 200);
+    assert.ok(r.body.includes(`/p/${siteUrl}/next`));
+  });
+
+  it('answers malformed requests with the right status', async () => {
+    const send = (data) => new Promise((resolve) => {
+      const s = net.connect(new URL(proxyUrl).port, '127.0.0.1', () => s.write(data));
+      let out = '';
+      s.on('data', (d) => { out += d; });
+      s.on('close', () => resolve(out));
+      s.on('error', () => resolve(out));
+    });
+    assert.match(await send('GARBAGE\r\n\r\n'), /^HTTP\/1\.1 400 /);
+    assert.match(await send(`GET / HTTP/1.1\r\nHost: x\r\nX-Big: ${'a'.repeat(20000)}\r\n\r\n`), /^HTTP\/1\.1 431 /);
+  });
+
+  it('turns a pasted proxy URL back into the site it points at', async () => {
+    const r = await request('/__proxy/go?url=' + encodeURIComponent(`${proxyUrl}/p/https://example.com/x?y=1`));
+    assert.strictEqual(r.headers.location, '/p/https://example.com/x?y=1');
   });
 
   it('unwraps proxied URLs that point back at the proxy', async () => {

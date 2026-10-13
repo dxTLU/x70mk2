@@ -22,8 +22,10 @@ function createServer() {
   });
   server.on('upgrade', handleUpgrade);
   server.on('clientError', (err, socket) => {
-    if (socket.writable) socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n');
-    else socket.destroy();
+    if (!socket.writable || err.code === 'ECONNRESET') return socket.destroy();
+    const status = err.code === 'HPE_HEADER_OVERFLOW' ? '431 Request Header Fields Too Large'
+      : err.code === 'ERR_HTTP_REQUEST_TIMEOUT' ? '408 Request Timeout' : '400 Bad Request';
+    socket.end(`HTTP/1.1 ${status}\r\nConnection: close\r\nContent-Length: 0\r\n\r\n`);
   });
   server.keepAliveTimeout = 65000;
   server.headersTimeout = 66000;

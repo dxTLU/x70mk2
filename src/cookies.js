@@ -126,13 +126,24 @@ function isPublicSuffix(host) {
   return Boolean(host) && publicSuffix(host) === host;
 }
 
+// Jar limits look this up for every stored cookie on every Set-Cookie, so remember answers.
+const siteCache = new Map();
+
 /** eTLD+1, e.g. "www.example.co.uk" -> "example.co.uk"; the host itself for IPs and suffixes. */
 function registrableDomain(host) {
-  host = canonicalHost(host);
-  const suffix = publicSuffix(host);
-  if (!suffix || suffix === host) return host;
-  const rest = host.slice(0, host.length - suffix.length - 1);
-  return rest.slice(rest.lastIndexOf('.') + 1) + '.' + suffix;
+  const key = String(host || '');
+  let out = siteCache.get(key);
+  if (out !== undefined) return out;
+  const h = canonicalHost(key);
+  const suffix = publicSuffix(h);
+  if (!suffix || suffix === h) out = h;
+  else {
+    const rest = h.slice(0, h.length - suffix.length - 1);
+    out = rest.slice(rest.lastIndexOf('.') + 1) + '.' + suffix;
+  }
+  if (siteCache.size >= 20000) siteCache.clear();
+  siteCache.set(key, out);
+  return out;
 }
 
 /** Schemeful site of a URL ("https://example.com"), as used for SameSite decisions. */
