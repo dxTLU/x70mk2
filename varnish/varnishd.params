@@ -1,0 +1,22 @@
+# varnishd runtime parameters for the proxy, one "name=value" per line (passed as -p name=value).
+#
+# Read by scripts/start.sh and test/varnish.test.js. deploy/varnish.service.d/override.conf and
+# docker-compose.yml repeat them; test/varnish.test.js checks that all copies agree.
+
+# Proxied URLs embed the whole target URL (/p/https://site/path?query), so request lines and
+# Referer headers are much longer than usual. The workspace must hold the whole request.
+http_req_hdr_len=65536
+http_req_size=131072
+workspace_client=262144
+
+# Some sites send very large response headers (Link, Content-Security-Policy, many cookies).
+http_resp_hdr_len=65536
+http_resp_size=131072
+workspace_backend=262144
+http_max_hdr=256
+
+# A response may take a long time to deliver: big downloads, video, server-sent events.
+send_timeout=86400
+
+# WebSockets are piped: close a tunnel only after an hour without traffic in either direction.
+pipe_timeout=3600
