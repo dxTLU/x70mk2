@@ -1,7 +1,7 @@
 'use strict';
 
-const { PREFIX, proxify } = require('./urls');
-const { rewriteCss } = require('./rewrite-css');
+const { PREFIX } = require('./urls');
+const { rewriteCss, proxifyUrl, keepSourceChars } = require('./rewrite-css');
 const { rewriteJs, rewriteScript, GUARD } = require('./rewrite-js');
 
 /*
@@ -79,6 +79,7 @@ const MAX_FRAGMENT_DEPTH = 3;
 const MAX_STACK = 512;
 
 const NON_WS = /[^\t\n\f\r ]/;
+const FOREIGN_ROOT = /<(?:svg|math)[\t\n\f\r />]/i;
 
 // Script text in SVG / XML is parsed as XML: keep the guard well-formed whatever it contains.
 const XML_GUARD = /[<&]/.test(GUARD) ? '<![CDATA[' + GUARD + ']]>' : GUARD;
@@ -163,15 +164,19 @@ function decodeEntities(s, inAttribute = true) {
 
 const ATTR_ESCAPES = { '&': '&amp;', '"': '&quot;', '<': '&lt;', '\t': '&#9;', '\n': '&#10;', '\r': '&#13;' };
 
-// For a double-quoted attribute. "<" and whitespace are escaped so XML parsers (SVG, XHTML) read
-// the value back unchanged; characters outside Latin-1 become references so the value survives
-// pages the proxy re-encodes byte for byte.
-const NEEDS_ESCAPE = /[&"<\t\n\r\u0100-\uffff]/;
+const NEEDS_ESCAPE = /[&"<\t\n\r]/;
+const charRef = (c) => '&#' + c.codePointAt(0) + ';';
 
-function escapeAttr(s) {
+/**
+ * For a double-quoted attribute. "<" and whitespace are escaped so XML parsers (SVG, XHTML) read
+ * the value back unchanged. Non-ASCII characters that were written literally in `source` (the
+ * original value) are kept, so a legacy-encoded page's bytes round-trip; the others came from
+ * character references and stay references, never raw bytes in the wrong encoding.
+ */
+function escapeAttr(s, source) {
   s = String(s);
-  if (!NEEDS_ESCAPE.test(s)) return s;
-  return s.replace(/[&"<\t\n\r]|[^\0-\xff]/gu, (c) => ATTR_ESCAPES[c] || '&#' + c.codePointAt(0) + ';');
+  if (NEEDS_ESCAPE.test(s)) s = s.replace(/[&"<\t\n\r]/g, (c) => ATTR_ESCAPES[c]);
+  return keepSourceChars(s, source, charRef);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -202,7 +207,7 @@ function rewriteSrcset(value, base) {
       }
       descriptor = value.slice(start, i).trim();
     }
-    if (url) out.push(proxify(url, base) + (descriptor ? ' ' + descriptor : ''));
+    if (url) out.push(proxifyUrl(url, base) + (descriptor ? ' ' + descriptor : ''));
   }
   return out.join(', ');
 }
@@ -248,14 +253,21 @@ function rewriteRefresh(content, base) {
     }
   }
   const url = content.slice(start, end);
-  const p = proxify(url, base);
+  const p = proxifyUrl(url, base);
   if (!url.trim() || p === url) return content;
   return content.slice(0, start) + p + content.slice(end);
 }
 
-// JSON placed back inside <script> must not be able to close the element.
-function scriptJson(value) {
-  return JSON.stringify(value).replace(/</g, '\\u003c');
+const jsonEscape = (c) => {
+  const cp = c.codePointAt(0);
+  if (cp <= 0xffff) return '\\u' + cp.toString(16).padStart(4, '0');
+  return jsonEscape(String.fromCharCode(0xd800 + ((cp - 0x10000) >> 10))) + jsonEscape(String.fromCharCode(0xdc00 + ((cp - 0x10000) & 0x3ff)));
+};
+
+// JSON placed back inside <script> must not be able to close the element; non-ASCII characters
+// that were escapes in `source` stay escapes (see escapeAttr).
+function scriptJson(value, source) {
+  return keepSourceChars(JSON.stringify(value).replace(/</g, '\\u003c'), source, jsonEscape);
 }
 
 const URL_LIKE = /^(?:\.{0,2}\/|[a-z][a-z0-9+.-]*:)/i;
@@ -264,23 +276,32 @@ function rewriteImportMap(json, base) {
   let map;
   try { map = JSON.parse(json); } catch { return json; }
   if (!map || typeof map !== 'object' || Array.isArray(map)) return json;
+  // Module specifiers in scripts are not rewritten, so an absolute or root-relative key keeps
+  // matching them as written; its proxied form is added for specifiers that were. Scope keys are
+  // matched against the importing module's (proxied) URL, so they are proxied. Entries are
+  // defined, not assigned, so a "__proto__" key stays a key.
+  const entries = [];
   const fix = (obj) => {
     if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return obj;
-    const res = {};
+    const res = [];
     for (const [k, v] of Object.entries(obj)) {
-      res[URL_LIKE.test(k) ? proxify(k, base) : k] = typeof v === 'string' && URL_LIKE.test(v) ? proxify(v, base) : v;
+      const nv = typeof v === 'string' && URL_LIKE.test(v) ? proxifyUrl(v, base) : v;
+      res.push([k, nv]);
+      if (URL_LIKE.test(k)) {
+        const pk = proxifyUrl(k, base);
+        if (pk !== k && !Object.hasOwn(obj, pk)) res.push([pk, nv]);
+      }
     }
-    return res;
+    return Object.fromEntries(res);
   };
-  if (map.imports) map.imports = fix(map.imports);
-  if (map.scopes && typeof map.scopes === 'object') {
-    const scopes = {};
-    for (const [k, v] of Object.entries(map.scopes)) scopes[proxify(k, base)] = fix(v);
-    map.scopes = scopes;
+  for (const [k, v] of Object.entries(map)) {
+    if (k === 'integrity') continue; // the proxy rewrites scripts, so their hashes would not match
+    if (k === 'imports') entries.push([k, fix(v)]);
+    else if (k === 'scopes' && v && typeof v === 'object' && !Array.isArray(v)) {
+      entries.push([k, Object.fromEntries(Object.entries(v).map(([sk, sv]) => [proxifyUrl(sk, base), fix(sv)]))]);
+    } else entries.push([k, v]);
   }
-  // The proxy rewrites scripts, so their hashes would no longer match.
-  delete map.integrity;
-  return scriptJson(map);
+  return scriptJson(Object.fromEntries(entries), json);
 }
 
 function escapeUrlPattern(s) {
@@ -329,11 +350,11 @@ function rewriteSpeculationRules(json, base) {
     if (!Array.isArray(list)) continue;
     for (const rule of list) {
       if (!rule || typeof rule !== 'object') continue;
-      if (Array.isArray(rule.urls)) rule.urls = rule.urls.map((u) => (typeof u === 'string' ? proxify(u, base) : u));
+      if (Array.isArray(rule.urls)) rule.urls = rule.urls.map((u) => (typeof u === 'string' ? proxifyUrl(u, base) : u));
       if (rule.where) walk(rule.where);
     }
   }
-  return scriptJson(rules);
+  return scriptJson(rules, json);
 }
 
 // A rewriter failing on one odd script or style sheet must not cost the whole page its rewriting.
@@ -349,6 +370,49 @@ function isJavascriptUrl(v) {
   const colon = v.indexOf(':');
   if (colon < 10) return false;
   return /^[\0- ]*javascript$/i.test(v.slice(0, colon).replace(/[\t\n\r]/g, ''));
+}
+
+/** Percent-decode as UTF-8, keeping "%" sequences that are not two hex digits. */
+function percentDecode(s) {
+  if (s.indexOf('%') === -1) return s;
+  const bytes = Buffer.from(s, 'utf8');
+  const out = Buffer.allocUnsafe(bytes.length);
+  const hex = (b) => (b >= 48 && b <= 57) || ((b | 32) >= 97 && (b | 32) <= 102);
+  let k = 0;
+  for (let i = 0; i < bytes.length; i++) {
+    if (bytes[i] === 37 && hex(bytes[i + 1]) && hex(bytes[i + 2])) {
+      out[k++] = parseInt(String.fromCharCode(bytes[i + 1], bytes[i + 2]), 16);
+      i += 2;
+    } else {
+      out[k++] = bytes[i];
+    }
+  }
+  return out.toString('utf8', 0, k);
+}
+
+/**
+ * Rewrite the text of an SVG / MathML / XML <script> or <style>. Unlike HTML raw text, it is
+ * character data: references are decoded (and must be re-escaped) and CDATA sections hold text
+ * verbatim, so the rewriter sees the code the browser runs either way.
+ */
+function rewriteForeignText(content, rewrite, isScript) {
+  const cs = content.indexOf('<![CDATA[');
+  if (cs !== -1) {
+    const ce = content.indexOf(']]>', cs + 9);
+    if (ce !== -1 && !NON_WS.test(content.slice(0, cs)) && !NON_WS.test(content.slice(ce + 3))) {
+      const inner = content.slice(cs + 9, ce);
+      const next = rewrite(inner);
+      return next === inner ? content : content.slice(0, cs + 9) + next.replace(/]]>/g, ']]]]><![CDATA[>') + content.slice(ce);
+    }
+    // Text mixed with CDATA sections: rewrite as is, keeping an added guard well-formed.
+    const next = rewrite(content);
+    return isScript && next !== content && XML_GUARD !== GUARD ? next.replace(GUARD, () => XML_GUARD) : next;
+  }
+  const text = content.indexOf('&') === -1 ? content : decodeEntities(content, false);
+  const next = rewrite(text);
+  if (next === text) return content;
+  const escaped = next.replace(/[&<]/g, (c) => (c === '&' ? '&amp;' : '&lt;')).replace(/]]>/g, ']]&gt;');
+  return keepSourceChars(escaped, content, charRef);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -413,21 +477,24 @@ function scriptEnd(html, from) {
   }
 }
 
-/** True when html[from, to) holds no markup other than CDATA sections. */
-function isPlainText(html, from, to) {
-  let i = html.indexOf('<', from);
-  while (i !== -1 && i < to) {
+/**
+ * End of an SVG / XML <script> or <style> whose content is plain text (CDATA sections allowed)
+ * up to its end tag, or -1 when markup comes first. It stops at the first tag, so a page full of
+ * unclosed <svg><style> costs no more than its length.
+ */
+function plainTextEnd(html, from, name) {
+  for (let i = html.indexOf('<', from); i !== -1; i = html.indexOf('<', i + 1)) {
     if (html.startsWith('<![CDATA[', i)) {
       const e = html.indexOf(']]>', i + 9);
-      if (e === -1 || e + 3 > to) return false;
-      i = html.indexOf('<', e + 3);
+      if (e === -1) return -1;
+      i = e + 2;
       continue;
     }
     const c = html.charCodeAt(i + 1);
-    if (isAlpha(c) || c === 47 || c === 33 || c === 63) return false;
-    i = html.indexOf('<', i + 1);
+    if (c === 47 && nameAt(html, i + 2, name) && isTagEnd(html.charCodeAt(i + 2 + name.length))) return i;
+    if (isAlpha(c) || c === 47 || c === 33 || c === 63) return -1;
   }
-  return true;
+  return html.length;
 }
 
 const COMMENT_END = /--!?>/g;
@@ -441,22 +508,28 @@ function commentEnd(html, p) {
   return m ? [m.index, m.index + m[0].length] : [html.length, html.length];
 }
 
-/** End of a <!DOCTYPE ...>, skipping an XML internal subset ([ ... ]) if there is one. */
-function doctypeEnd(html, lt) {
+/**
+ * End of a <!DOCTYPE ...>. HTML ends it at the first ">"; XML skips an internal subset
+ * ([ ... ]), and an unterminated one runs to the end of the input (the document is not
+ * well-formed anyway), which keeps a page of doctypes linear.
+ */
+function doctypeEnd(html, lt, xml) {
   const n = html.length;
   const gt = html.indexOf('>', lt);
   if (gt === -1) return n;
-  const br = html.indexOf('[', lt);
-  if (br === -1 || br > gt) return gt + 1;
+  if (!xml) return gt + 1;
+  let br = lt;
+  while (br < gt && html.charCodeAt(br) !== 91) br++;
+  if (br === gt) return gt + 1;
   for (let i = br + 1; i < n;) {
     const c = html.charCodeAt(i);
     if (c === 34 || c === 39) {
       const q = html.indexOf(c === 34 ? '"' : "'", i + 1);
-      if (q === -1) break;
+      if (q === -1) return n;
       i = q + 1;
     } else if (c === 60 && html.startsWith('<!--', i)) {
       const e = html.indexOf('-->', i + 4);
-      if (e === -1) break;
+      if (e === -1) return n;
       i = e + 3;
     } else if (c === 93) {
       let k = i + 1;
@@ -467,7 +540,7 @@ function doctypeEnd(html, lt) {
       i++;
     }
   }
-  return gt + 1;
+  return n;
 }
 
 /**
@@ -539,10 +612,138 @@ function scriptKind(attrs) {
   return JS_TYPES.has(type.split(';')[0].trim()) ? 'js' : null;
 }
 
-// Hyperlink-ish URLs are resolved when followed, so a <base> later in the document applies to them.
-function isLazy(tag, attr) {
-  if (attr === 'href') return tag === 'a' || tag === 'area';
-  return (attr === 'action' && tag === 'form') || attr === 'formaction' || attr === 'ping';
+/**
+ * URLs resolved after parsing, so a <base> later in the document applies to them: links and
+ * forms (when followed), and loads Chromium defers until layout or media selection (plugins,
+ * image inputs, SVG images, media, background attributes). Images, scripts, style sheets and
+ * frames load with the base in effect where they are parsed.
+ */
+function isLazy(tag, attr, ns) {
+  switch (attr) {
+    case 'href': return tag === 'a' || tag === 'area' || (tag === 'image' && ns !== 'html'); // HTML <image> is <img>
+    case 'xlink:href': return tag === 'a' || tag === 'image';
+    case 'action': return tag === 'form';
+    case 'data': return tag === 'object';
+    case 'src': return tag === 'embed' || tag === 'input' || tag === 'video' || tag === 'audio' || tag === 'source' || tag === 'track';
+    case 'formaction': case 'ping': case 'background': return true;
+  }
+  return false;
+}
+
+const XHTML_NS = 'http://www.w3.org/1999/xhtml';
+
+function escapeXml(s) {
+  return s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+}
+
+/**
+ * The injected markup made well-formed for XML documents (XHTML served as XML): attributes get
+ * values, script text goes in CDATA, and elements are put in the XHTML namespace so they are
+ * scripts whatever the root element is.
+ */
+function xmlMarkup(markup) {
+  let out = '';
+  let i = 0;
+  const n = markup.length;
+  while (i < n) {
+    const lt = markup.indexOf('<', i);
+    if (lt === -1 || !isAlpha(markup.charCodeAt(lt + 1))) {
+      // Only text between elements, or end tags, remain.
+      const end = lt === -1 ? n : markup.indexOf('>', lt) + 1 || n;
+      out += markup.slice(i, end);
+      i = end;
+      continue;
+    }
+    out += markup.slice(i, lt);
+    let j = lt + 1;
+    while (j < n && !isTagEnd(markup.charCodeAt(j))) j++;
+    const name = markup.slice(lt + 1, j).toLowerCase();
+    const t = parseAttrs(markup, j);
+    let tag = '<' + name;
+    let hasNs = false;
+    for (const a of t.attrs) {
+      if (a.name === 'xmlns') hasNs = true;
+      tag += ' ' + a.name + '="' + escapeXml(a.value == null ? '' : decodeEntities(a.value)) + '"';
+    }
+    out += tag + (hasNs ? '' : ' xmlns="' + XHTML_NS + '"') + '>';
+    i = t.end;
+    if (RAW_TEXT[name] && !t.selfClosing) {
+      const stop = rawTextEnd(markup, i, name);
+      const text = markup.slice(i, stop);
+      out += /[<&]/.test(text) ? '<![CDATA[' + text.replace(/]]>/g, ']]]]><![CDATA[>') + ']]>' : text;
+      i = stop;
+    } else if (t.selfClosing || VOID.has(name)) {
+      out = out.slice(0, -1) + '/>';
+    }
+  }
+  return out;
+}
+
+/**
+ * A stack of open elements ({name, ns, ip}) that finds the topmost element of a kind in O(1),
+ * so matching an end tag costs the same however deep (or hostile) the nesting is.
+ */
+class OpenElements {
+  constructor() {
+    this.items = [];
+    this.html = null; // name -> positions of HTML elements (created on first use)
+    this.foreign = null; // name -> positions of SVG / MathML elements
+    this.htmlAt = []; // positions of HTML elements
+    // Positions of integration points and HTML scope boundaries: the search for an HTML element
+    // to close stops at them.
+    this.blocks = [];
+  }
+
+  get length() {
+    return this.items.length;
+  }
+
+  top() {
+    return this.items[this.items.length - 1];
+  }
+
+  push(item) {
+    const pos = this.items.length;
+    this.items.push(item);
+    const map = item.ns === 'html' ? (this.html ||= new Map()) : (this.foreign ||= new Map());
+    let list = map.get(item.name);
+    if (!list) map.set(item.name, (list = []));
+    list.push(pos);
+    item.list = list;
+    if (item.ns === 'html') {
+      this.htmlAt.push(pos);
+      if (SCOPE.has(item.name)) this.blocks.push(pos);
+    } else if (item.ip) {
+      this.blocks.push(pos);
+    }
+  }
+
+  pop() {
+    const item = this.items.pop();
+    const pos = this.items.length;
+    item.list.pop();
+    if (item.ns === 'html') this.htmlAt.pop();
+    if (this.blocks[this.blocks.length - 1] === pos) this.blocks.pop();
+  }
+
+  truncate(len) {
+    while (this.items.length > len) this.pop();
+  }
+
+  /** Position of the topmost HTML (or foreign) element with this name, or -1. */
+  last(name, foreign) {
+    const map = foreign ? this.foreign : this.html;
+    const list = map && map.get(name);
+    return list && list.length ? list[list.length - 1] : -1;
+  }
+
+  lastHtml() {
+    return this.htmlAt.length ? this.htmlAt[this.htmlAt.length - 1] : -1;
+  }
+
+  lastBlock() {
+    return this.blocks.length ? this.blocks[this.blocks.length - 1] : -1;
+  }
 }
 
 // ---------------------------------------------------------------------------------------
@@ -571,11 +772,14 @@ function run(html, pageUrl, o, linkBase) {
   let base = pageUrl;
   let baseSeen = o.fragment;
   let lazyBeforeBase = false;
+  let rootSeen = false;
   // Open SVG / MathML elements, and HTML elements inside their HTML integration points.
-  const stack = [];
+  const stack = new OpenElements();
   // Approximate stack of open HTML elements outside foreign content (no implied end tags): only
-  // used to tell whether an end tag inside <svg>/<math> closes one of their HTML ancestors.
-  const open = [];
+  // used to tell whether an end tag inside <svg>/<math> closes one of their HTML ancestors, so
+  // documents without inline SVG / MathML skip it.
+  const open = new OpenElements();
+  const trackOpen = !o.xml && FOREIGN_ROOT.test(html);
 
   const inject = (at) => {
     if (!injected) {
@@ -587,12 +791,21 @@ function run(html, pageUrl, o, linkBase) {
     const js = safe(rewriteJs, code);
     return js === code || o.runtime ? js : GUARD + js;
   };
-  const top = () => stack[stack.length - 1];
+  // A javascript: URL runs its percent-decoded text, once the URL parser has dropped tabs and
+  // newlines: rewrite that, and encode what would otherwise be decoded or dropped again.
+  const jsUrlCode = (code) => {
+    if (!/[%\t\n\r]/.test(code)) return jsCode(code);
+    const src = percentDecode(code.replace(/[\t\n\r]/g, ''));
+    const js = jsCode(src);
+    if (js === src) return code;
+    return js.replace(/[%\t\n\r]/g, (c) => '%' + c.charCodeAt(0).toString(16).toUpperCase().padStart(2, '0'));
+  };
+  const top = () => stack.top();
   const inForeign = () => stack.length > 0 && top().ns !== 'html' && !top().ip;
   const nested = (content, docBase) =>
     run(content, docBase, { ...o, inject: '', depth: o.depth + 1, fragment: true }, linkBase || base);
 
-  function rewriteAttr(at, tag, refresh) {
+  function rewriteAttr(at, tag, ns, refresh) {
     const ln = at.name;
     if (DROP_ATTRS.has(ln)) return '';
     if (at.value === null) return undefined;
@@ -602,7 +815,7 @@ function run(html, pageUrl, o, linkBase) {
     else if (ln === 'style') kind = 3;
     else if (ln.charCodeAt(0) === 111 && ln.charCodeAt(1) === 110 && HANDLER.test(ln)) kind = 4; // on*
     else if (URL_LIST_ATTRS.has(ln)) kind = 5;
-    else if (ln === 'srcdoc') kind = 6;
+    else if (ln === 'srcdoc' && tag === 'iframe') kind = 6;
     else if (ln === 'content' && refresh) kind = 7;
     else if (ln === 'rel') kind = 8;
     else if (CSS_URL_ATTRS.has(ln)) kind = 9;
@@ -614,14 +827,14 @@ function run(html, pageUrl, o, linkBase) {
       case 1:
         if (isJavascriptUrl(v)) {
           const colon = v.indexOf(':') + 1;
-          nv = v.slice(0, colon) + jsCode(v.slice(colon));
+          nv = v.slice(0, colon) + jsUrlCode(v.slice(colon));
         } else if (tag === 'base' && ln === 'href') {
-          nv = proxify(v, pageUrl);
-        } else if (isLazy(tag, ln)) {
-          nv = proxify(v, linkBase || base);
+          nv = proxifyUrl(v, pageUrl);
+        } else if (isLazy(tag, ln, ns)) {
+          nv = proxifyUrl(v, linkBase || base);
           if (!baseSeen && nv !== v) lazyBeforeBase = true;
         } else {
-          nv = proxify(v, base);
+          nv = proxifyUrl(v, base);
         }
         break;
       case 2:
@@ -634,16 +847,23 @@ function run(html, pageUrl, o, linkBase) {
         nv = jsCode(v);
         break;
       case 5: {
-        const lazy = isLazy(tag, ln);
+        const lazy = isLazy(tag, ln, ns);
         const b = lazy ? linkBase || base : base;
-        nv = v.replace(/[^\t\n\f\r ]+/g, (u) => proxify(u, b));
+        nv = v.replace(/[^\t\n\f\r ]+/g, (u) => proxifyUrl(u, b));
         if (lazy && !baseSeen && nv !== v) lazyBeforeBase = true;
         break;
       }
       case 6:
         if (o.depth < MAX_SRCDOC_DEPTH) {
-          const inject = o.docInject;
-          nv = rewriteDocument(v, base, { inject, docInject: inject, xml: false, runtime: Boolean(inject), depth: o.depth + 1, fragment: false });
+          // Memoised: a document rewritten twice (late <base>) must not redo its nested
+          // documents, or each level of srcdoc nesting would double the work.
+          const key = o.depth + ' ' + base + ' ' + v;
+          nv = o.memo.get(key);
+          if (nv === undefined) {
+            const inject = o.docInject;
+            nv = rewriteDocument(v, base, { inject, docInject: inject, xml: false, runtime: Boolean(inject), depth: o.depth + 1, fragment: false, memo: o.memo });
+            o.memo.set(key, nv);
+          }
         }
         break;
       case 7:
@@ -657,7 +877,7 @@ function run(html, pageUrl, o, linkBase) {
         break;
     }
     if (nv === v) return undefined;
-    return (at.nameStart > at.start ? html.slice(at.start, at.nameStart) : ' ') + at.raw + '="' + escapeAttr(nv) + '"';
+    return (at.nameStart > at.start ? html.slice(at.start, at.nameStart) : ' ') + at.raw + '="' + escapeAttr(nv, at.value) + '"';
   }
 
   function startTag(lt) {
@@ -695,8 +915,8 @@ function run(html, pageUrl, o, linkBase) {
           if (stack.length) {
             // Inside an integration point the tree builder is "in body", where table parts are ignored.
             if (!TABLE_PARTS.has(name) && stack.length < MAX_STACK) stack.push({ name, ns, ip: false });
-          } else if (open.length < MAX_STACK) {
-            open.push(name);
+          } else if (trackOpen && open.length < MAX_STACK) {
+            open.push({ name, ns, ip: false });
           }
         }
       }
@@ -704,7 +924,12 @@ function run(html, pageUrl, o, linkBase) {
     const isHtml = ns === 'html' || ns === 'xml';
 
     // The runtime goes before the first thing that could run or render, but after a charset <meta>.
-    if (!injected && name !== 'html' && name !== 'head' &&
+    // In XML it can never go before (or after) the root element: there it goes inside it.
+    if (!injected && o.xml && !rootSeen) {
+      rootSeen = true;
+      if (selfClosing) injected = true;
+      else if (name !== 'html') inject(t.end);
+    } else if (!injected && name !== 'html' && name !== 'head' &&
         !(name === 'meta' && attrs.some((a) => a.name === 'charset' || (a.name === 'http-equiv' && /^\s*content-type\s*$/i.test(decodeEntities(a.value || '')))))) {
       inject(lt);
     }
@@ -722,7 +947,7 @@ function run(html, pageUrl, o, linkBase) {
       splice(lt, t.end, '');
     } else {
       for (const at of attrs) {
-        const r = rewriteAttr(at, name, refresh);
+        const r = rewriteAttr(at, name, ns, refresh);
         if (r !== undefined) splice(at.start, at.end, r);
       }
     }
@@ -750,8 +975,8 @@ function run(html, pageUrl, o, linkBase) {
     } else if ((name === 'script' || name === 'style') && !selfClosing) {
       // SVG / MathML / XML script and style hold markup; rewrite them as code only when they are
       // plain text (CDATA allowed), otherwise their tags are parsed like any others.
-      const end = rawTextEnd(html, i2, name);
-      if (isPlainText(html, i2, end)) {
+      const end = plainTextEnd(html, i2, name);
+      if (end !== -1) {
         kind = name === 'script' ? 'script' : 'css';
         stop = end;
       }
@@ -759,18 +984,17 @@ function run(html, pageUrl, o, linkBase) {
     if (kind) {
       const content = html.slice(i2, stop);
       let next = content;
+      let fn = null;
       if (kind === 'script') {
         const type = scriptKind(attrs);
-        if (type === 'js') {
-          next = o.runtime ? safe(rewriteJs, content) : safe(rewriteScript, content);
-          if (ns !== 'html' && next !== content && XML_GUARD !== GUARD) next = next.replace(GUARD, () => XML_GUARD);
-        } else if (type === 'importmap') {
-          next = rewriteImportMap(content, base);
-        } else if (type === 'speculationrules') {
-          next = rewriteSpeculationRules(content, base);
-        }
+        if (type === 'js') fn = (t) => (o.runtime ? safe(rewriteJs, t) : safe(rewriteScript, t));
+        else if (type === 'importmap') fn = (t) => rewriteImportMap(t, base);
+        else if (type === 'speculationrules') fn = (t) => rewriteSpeculationRules(t, base);
       } else if (kind === 'css') {
-        next = safe(rewriteCss, content, base);
+        fn = (t) => safe(rewriteCss, t, base);
+      }
+      if (fn) {
+        next = ns === 'html' ? fn(content) : rewriteForeignText(content, fn, kind === 'script');
       } else if (kind === 'html' && o.depth < MAX_FRAGMENT_DEPTH) {
         // Shown when scripting is off, and read back by lazy-loaders; it never runs past </noscript>.
         const r = nested(content, base);
@@ -794,56 +1018,47 @@ function run(html, pageUrl, o, linkBase) {
       closeForeign(name);
     } else {
       const k = openIndex(name);
-      if (k !== -1) open.length = k;
+      if (k !== -1) open.truncate(k);
     }
     return t.end;
   }
 
   // Innermost open HTML ancestor (outside foreign content) with this name, within scope.
   function openIndex(name) {
-    for (let k = open.length - 1; k >= 0; k--) {
-      if (open[k] === name) return k;
-      if (SCOPE.has(open[k])) break;
-    }
-    return -1;
+    if (open.length && open.top().name === name) return open.length - 1;
+    const k = open.last(name);
+    return k !== -1 && k >= open.lastBlock() ? k : -1;
   }
 
   // An end tag inside foreign content, following the tree builder: foreign elements match by
-  // name from the current node down; otherwise the HTML rules look for an open HTML element and
-  // stop at integration points and scope boundaries, so a stray </div> inside <svg><title> does
-  // nothing while one that closes the <div> around an unclosed <svg> ends the SVG.
+  // name from the current node down to the first HTML element; otherwise the HTML rules look for
+  // an open HTML element and stop at integration points and scope boundaries, so a stray </div>
+  // inside <svg><title> does nothing while one that closes the <div> around an unclosed <svg>
+  // ends the SVG.
   function closeForeign(name) {
     if ((name === 'p' || name === 'br') && inForeign()) {
       while (inForeign()) stack.pop();
       return;
     }
-    if (top().ns !== 'html') {
-      for (let k = stack.length - 1; k >= 0 && stack[k].ns !== 'html'; k--) {
-        if (stack[k].name === name) {
-          stack.length = k;
-          return;
-        }
-      }
-      // Chromium case-adjusts end tags under an SVG node (</foreignObject>), so they never match
-      // an HTML element.
-      if (top().ns === 'svg' && SVG_CAMEL.has(name)) return;
+    const f = stack.last(name, true);
+    if (f > stack.lastHtml()) {
+      stack.truncate(f);
+      return;
     }
-    for (let k = stack.length - 1; k >= 0; k--) {
-      const e = stack[k];
-      if (e.ns === 'html') {
-        if (e.name === name) {
-          stack.length = k;
-          return;
-        }
-        if (SCOPE.has(e.name)) return;
-      } else if (e.ip) {
-        return;
-      }
+    // Chromium case-adjusts end tags under an SVG node (</foreignObject>), so they never match
+    // an HTML element.
+    if (top().ns === 'svg' && SVG_CAMEL.has(name)) return;
+    const h = stack.last(name);
+    const b = stack.lastBlock();
+    if (h !== -1 && h >= b) {
+      stack.truncate(h);
+      return;
     }
+    if (b !== -1) return;
     const k = openIndex(name);
     if (k !== -1) {
-      open.length = k;
-      stack.length = 0;
+      open.truncate(k);
+      stack.truncate(0);
     }
   }
 
@@ -858,13 +1073,31 @@ function run(html, pageUrl, o, linkBase) {
       }
       return end;
     }
-    if (nameAt(html, lt + 2, 'doctype')) return doctypeEnd(html, lt);
+    if (nameAt(html, lt + 2, 'doctype')) return doctypeEnd(html, lt, o.xml);
     // Browsers honour CDATA only in foreign content proper, not at integration points (<svg><title>).
     if (html.startsWith('<![CDATA[', lt) && (o.xml || inForeign())) {
       const e = html.indexOf(']]>', lt + 9);
       return e === -1 ? n : e + 3;
     }
     return bogusComment(lt);
+  }
+
+  // XML processing instruction (ends at "?>"); <?xml-stylesheet href="..."?> loads a style sheet.
+  function processingInstruction(lt) {
+    const e = html.indexOf('?>', lt + 2);
+    const end = e === -1 ? n : e + 2;
+    if (html.startsWith('xml-stylesheet', lt + 2) && isWs(html.charCodeAt(lt + 16))) {
+      const m = /(\shref[\t\n\r ]*=[\t\n\r ]*)("[^"]*"|'[^']*')/.exec(html.slice(lt + 16, end));
+      if (m) {
+        const v = decodeEntities(m[2].slice(1, -1), false);
+        const nv = proxifyUrl(v, base);
+        if (nv !== v) {
+          const at = lt + 16 + m.index + m[1].length;
+          splice(at, at + m[2].length, '"' + escapeAttr(nv, m[2]) + '"');
+        }
+      }
+    }
+    return end;
   }
 
   function bogusComment(lt) {
@@ -891,15 +1124,31 @@ function run(html, pageUrl, o, linkBase) {
     } else if (c === 33) {
       i = markupDeclaration(lt);
     } else if (c === 63) {
-      i = bogusComment(lt);
+      i = o.xml ? processingInstruction(lt) : bogusComment(lt);
     } else {
       i = lt + 1;
     }
   }
-  inject(n);
+  if (!(o.xml && rootSeen)) inject(n);
   if (copied === 0 && parts.length === 0) return { out: html, base, lazyBeforeBase };
   splice(n, n, '');
   return { out: parts.join(''), base, lazyBeforeBase };
+}
+
+/**
+ * A fetched "text/html" body that is really JSON (PHP's default content type): markup inside its
+ * strings is data, and rewriting it would break the JSON.
+ */
+function isJson(s) {
+  // Also with an anti-hijacking prefix: )]}' (Angular, Google), while(1); and for(;;);
+  const m = /^[\t\n\f\r ]*(?:\)\]\}',?|while\s*\(\s*1\s*\)\s*;|for\s*\(\s*;\s*;\s*\)\s*;)?[\t\n\f\r ]*[{[]/.exec(s);
+  if (!m) return false;
+  try {
+    JSON.parse(s.slice(m[0].length - 1));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function rewriteDocument(html, pageUrl, o) {
@@ -922,8 +1171,12 @@ function rewriteDocument(html, pageUrl, o) {
  */
 function rewriteHtml(html, pageUrl, opts = {}) {
   const src = html == null ? '' : String(html);
-  const inject = opts.inject || '';
-  return rewriteDocument(src, pageUrl, { inject, docInject: inject, xml: Boolean(opts.xml), runtime: Boolean(inject), depth: 0, fragment: false });
+  const docInject = opts.inject ? String(opts.inject) : '';
+  // Without the runtime this is not a page being shown (fetch / XHR): leave JSON alone.
+  if (!docInject && !opts.xml && isJson(src)) return src;
+  // srcdoc documents are always HTML; only the XML document itself needs well-formed markup.
+  const inject = docInject && opts.xml ? xmlMarkup(docInject) : docInject;
+  return rewriteDocument(src, pageUrl, { inject, docInject, xml: Boolean(opts.xml), runtime: Boolean(inject), depth: 0, fragment: false, memo: new Map() });
 }
 
 module.exports = { rewriteHtml, rewriteSrcset, decodeEntities };

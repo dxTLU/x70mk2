@@ -139,7 +139,9 @@ describe('character references', () => {
     assert.strictEqual(rw('<a href="/s?a=1&b=2">'), `<a href="${P}/s?a=1&amp;b=2">`);
     assert.strictEqual(rw('<a href="/s?a=1&copy=2">'), `<a href="${P}/s?a=1&amp;copy=2">`);
     assert.strictEqual(rw('<a href="/s?q=&quot;x&quot;&lt;">'), `<a href="${P}/s?q=%22x%22%3C">`);
-    assert.strictEqual(rw('<a href="/caf&eacute;">'), `<a href="${P}/caf%C3%A9">`);
+    // A referenced non-ASCII character stays a reference: the browser decodes it and encodes it
+    // as it would have for the original URL (see "legacy encodings").
+    assert.strictEqual(rw('<a href="/caf&eacute;">'), `<a href="${P}/caf&#233;">`);
     assert.strictEqual(rw('<a href="&#x2F;&#x2F;cdn.example/x">'), '<a href="/p/https://cdn.example/x">');
   });
 
@@ -151,8 +153,10 @@ describe('character references', () => {
     assert.strictEqual(rwd('<a onclick="a()&#10;location.reload()">'), '<a onclick="a()&#10;__pLocation.reload()">');
   });
 
-  it('writes characters outside Latin-1 as references (safe for single-byte pages)', () => {
-    assert.strictEqual(rwd('<a onclick="x(\'\u2603\');location.reload()">'), '<a onclick="x(\'&#9731;\');__pLocation.reload()">');
+  it('writes referenced non-ASCII characters back as references (safe for single-byte pages)', () => {
+    // Written literally, a character above Latin-1 can only come from a UTF-8 page: it stays.
+    assert.strictEqual(rwd('<a onclick="x(\'\u2603\');location.reload()">'), '<a onclick="x(\'\u2603\');__pLocation.reload()">');
+    assert.strictEqual(rwd('<a onclick="x(\'&#9731;\');location.reload()">'), '<a onclick="x(\'&#9731;\');__pLocation.reload()">');
     assert.strictEqual(rwd('<a onclick="x(\'&#x1F600;\');location.reload()">'), '<a onclick="x(\'&#128512;\');__pLocation.reload()">');
   });
 
@@ -442,9 +446,12 @@ describe('inline scripts', () => {
     const out = rwd(`<script type="importmap">${JSON.stringify(map)}</script>`);
     const json = JSON.parse(out.slice(out.indexOf('>') + 1, out.lastIndexOf('</script>')));
     assert.deepStrictEqual(json, {
+      // URL-like keys stay (module specifiers are not rewritten) and gain their proxied form.
       imports: {
         lib: `${P}/lib.js`,
+        'https://cdn.example/x': `${P}/dir/x.js`,
         '/p/https://cdn.example/x': `${P}/dir/x.js`,
+        './rel/': `${P}/up/`,
         [`${P}/dir/rel/`]: `${P}/up/`,
         'node:fs': `${P}/fs.js`,
         bare: 'bare-value',
@@ -788,5 +795,273 @@ describe('performance', () => {
       const { ms } = time(() => rewriteHtml(src, PAGE, { inject: INJ }));
       assert.ok(ms < 1500, `${JSON.stringify(src.slice(0, 20))} took ${ms.toFixed(0)} ms`);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// Adversarial regressions: each case below was broken (wrong output, URL left unproxied, or
+// quadratic time) and is checked against what Chromium does with the same markup.
+
+describe('foreign content matches the browser', () => {
+  const X = `${P}/x`;
+
+  it('treats <![CDATA[ at an integration point as a bogus comment, not CDATA', () => {
+    // Chromium (and Firefox) only honour CDATA in foreign content proper.
+    assert.strictEqual(rw('<svg><desc><![CDATA[x]]><img src=/i>'), `<svg><desc><![CDATA[x]]><img src="${P}/i">`);
+    assert.strictEqual(rw('<svg><title><![CDATA[a>b</title><a href=/x>t</a>'), `<svg><title><![CDATA[a>b</title><a href="${X}">t</a>`);
+    assert.strictEqual(rw('<math><mi><![CDATA[a><img src=/x>'), `<math><mi><![CDATA[a><img src="${X}">`);
+    // ...and still honour it in SVG itself.
+    assert.strictEqual(rw('<svg><![CDATA[<a href=/x>]]></svg><a href=/y>'), `<svg><![CDATA[<a href=/x>]]></svg><a href="${P}/y">`);
+  });
+
+  it('keeps <mglyph> and <malignmark> MathML inside text integration points', () => {
+    // So a following <style> / <title> is a MathML element holding markup, not raw text.
+    assert.strictEqual(rw('<math><mi><mglyph><style><a href=/x></style>'), `<math><mi><mglyph><style><a href="${X}"></style>`);
+    assert.strictEqual(rw('<math><mi><malignmark><title><a href=/x>t</a>'), `<math><mi><malignmark><title><a href="${X}">t</a>`);
+    assert.strictEqual(rw('<math><mi><html><mglyph><style><a href=/x></style>'), `<math><mi><html><mglyph><style><a href="${X}"></style>`);
+  });
+
+  it('closes an unclosed <svg> when an HTML ancestor closes', () => {
+    const out = rwd('<div><svg><path></div><script>if(a<b)location.href="/x"</script>');
+    assert.ok(out.includes('<script>if(a<b)__pLocation.href="/x"</script>'), out);
+    assert.strictEqual(rw('<table><tr><td><svg><g></td><style><a href=/x></style>'), '<table><tr><td><svg><g></td><style><a href=/x></style>');
+  });
+
+  it('ignores end tags that do not close anything in scope', () => {
+    // A stray end tag stays inside the SVG, where <title/> self-closes.
+    assert.strictEqual(rw('<svg></span><title/><a href=/x>t</a></svg>'), `<svg></span><title/><a href="${X}">t</a></svg>`);
+    assert.strictEqual(rw('<body><svg></body><title/><a href=/x>t</a>'), `<body><svg></body><title/><a href="${X}">t</a>`);
+    // An integration point stops the search: </svg> inside <foreignObject><span> does nothing.
+    assert.strictEqual(
+      rw('<svg><foreignObject><span></svg></span></foreignObject><style><a href=/x></style>'),
+      `<svg><foreignObject><span></svg></span></foreignObject><style><a href="${X}"></style>`
+    );
+    assert.strictEqual(rw('<svg><foreignObject><div></svg><title/><a href=/x>t</a>'), '<svg><foreignObject><div></svg><title/><a href=/x>t</a>');
+  });
+
+  it('does not let a case-adjusted SVG end tag close an HTML element', () => {
+    assert.strictEqual(
+      rw('<foreignObject><svg><a></foreignObject><style><a href=/x></style>'),
+      `<foreignObject><svg><a></foreignObject><style><a href="${X}"></style>`
+    );
+  });
+
+  it('ends an HTML doctype at the first ">"; only XML has an internal subset', () => {
+    assert.strictEqual(rw('<!DOCTYPE html [ ><img src=/x> ]>'), `<!DOCTYPE html [ ><img src="${X}"> ]>`);
+    const svg = '<!DOCTYPE svg [ <!ENTITY a "<img src=/x>"> ]><svg><image href="/i.png"/></svg>';
+    assert.strictEqual(rw(svg, { xml: true }), svg.replace('/i.png', `${P}/i.png`));
+  });
+});
+
+describe('hostile input stays linear', () => {
+  const time = (src, opts = { inject: INJ }) => {
+    const t0 = process.hrtime.bigint();
+    rewriteHtml(src, PAGE, opts);
+    return Number(process.hrtime.bigint() - t0) / 1e6;
+  };
+  // Each of these took 2 to 20 seconds (quadratic or exponential) before.
+  const cases = {
+    'doctype runs': '<!doctype html>'.repeat(300000),
+    'doctype runs in XML': '<!DOCTYPE x [ "'.repeat(200000),
+    'unclosed SVG <style>': '<svg><style>'.repeat(50000),
+    'unclosed SVG <script>': '<svg><script>a'.repeat(50000),
+    'stray end tags under deep SVG': '<svg>' + '<g>'.repeat(600) + '</x>'.repeat(1000000),
+    'stray end tags under deep HTML': '<div>'.repeat(600) + '</x>'.repeat(1000000),
+    'template markers': '<a href="' + '{{'.repeat(1000000) + '">',
+  };
+  for (const [name, src] of Object.entries(cases)) {
+    it(name, () => {
+      const ms = time(src);
+      assert.ok(ms < 1500, `${name}: ${ms.toFixed(0)} ms`);
+    });
+  }
+
+  it('nested srcdoc documents with a late <base> are rewritten once each', () => {
+    let doc = 'x';
+    for (let d = 0; d < 9; d++) {
+      const attr = doc.replace(/&/g, '&amp;').replace(/"/g, '&quot;');
+      doc = `<a href=/l${d}></a><iframe srcdoc="${attr}"></iframe><iframe srcdoc="${attr}"></iframe><base href=/b/>`;
+    }
+    const ms = time(doc);
+    assert.ok(ms < 500, `nested srcdoc: ${ms.toFixed(0)} ms`);
+  });
+});
+
+describe('XHTML served as XML', () => {
+  const RUNTIME = '<script data-proxy-runtime>window.__PROXY_CFG={"url":"https://site.example/a?x=1&y=2","c":"]]>"};</script>' +
+    '<script src="/__proxy/client.js?v=1" data-proxy-runtime></script>';
+  const XML_RUNTIME = '<script data-proxy-runtime="" xmlns="http://www.w3.org/1999/xhtml"><![CDATA[window.__PROXY_CFG=' +
+    '{"url":"https://site.example/a?x=1&y=2","c":"]]]]><![CDATA[>"};]]></script>' +
+    '<script src="/__proxy/client.js?v=1" data-proxy-runtime="" xmlns="http://www.w3.org/1999/xhtml"></script>';
+  const rx = (html) => rewriteHtml(html, PAGE, { inject: RUNTIME, xml: true });
+
+  it('injects well-formed markup in the XHTML namespace', () => {
+    const doc = '<?xml version="1.0"?>\n<html xmlns="http://www.w3.org/1999/xhtml"><head><title>t</title></head><body/></html>';
+    assert.strictEqual(rx(doc), doc.replace('<title>', XML_RUNTIME + '<title>'));
+  });
+
+  it('injects inside the root element, never next to it', () => {
+    assert.strictEqual(rx('<svg xmlns="http://www.w3.org/2000/svg"><rect/></svg>'), `<svg xmlns="http://www.w3.org/2000/svg">${XML_RUNTIME}<rect/></svg>`);
+    assert.strictEqual(rx('<html xmlns="http://www.w3.org/1999/xhtml"/>'), '<html xmlns="http://www.w3.org/1999/xhtml"/>');
+  });
+
+  it('gives srcdoc documents (always HTML) the HTML runtime markup', () => {
+    const out = rx('<html xmlns="http://www.w3.org/1999/xhtml"><body><iframe srcdoc="&lt;p>x"/></body></html>');
+    assert.ok(out.includes('srcdoc="&lt;script data-proxy-runtime>window.__PROXY_CFG='), out);
+    assert.ok(!/srcdoc="[^"]*CDATA/.test(out), out);
+  });
+
+  it('rewrites <?xml-stylesheet href?> and ends processing instructions at "?>"', () => {
+    assert.strictEqual(
+      rw('<?xml-stylesheet type="text/css" href="s.css?a=1&amp;b=2"?><svg/>', { xml: true }),
+      `<?xml-stylesheet type="text/css" href="${P}/dir/s.css?a=1&amp;b=2"?><svg/>`
+    );
+    assert.strictEqual(rw('<?pi a>b?><image href="/i"/>', { xml: true }), `<?pi a>b?><image href="${P}/i"/>`);
+  });
+});
+
+describe('SVG / XML script and style text is character data', () => {
+  it('decodes references before rewriting and escapes the result again', () => {
+    assert.strictEqual(
+      rw('<svg><style>rect{fill:url(&quot;/g.svg#a&quot;)}</style></svg>'),
+      `<svg><style>rect{fill:url("${P}/g.svg#a")}</style></svg>`
+    );
+    assert.strictEqual(
+      rwd('<svg><script>if (a &lt; b &amp;&amp; c) location.href = &quot;/x&quot;;</script></svg>'),
+      '<svg><script>if (a &lt; b &amp;&amp; c) __pLocation.href = "/x";</script></svg>'
+    );
+  });
+
+  it('rewrites a CDATA section in place', () => {
+    assert.strictEqual(
+      rwd('<svg><script>\n<![CDATA[\nif (a < b && c) location.href = "/x";\n]]>\n</script></svg>'),
+      '<svg><script>\n<![CDATA[\nif (a < b && c) __pLocation.href = "/x";\n]]>\n</script></svg>'
+    );
+  });
+
+  it('keeps the guard (which contains "&&") well-formed without the runtime', () => {
+    const out = rw('<svg><script>location.reload()</script></svg>', { xml: true });
+    assert.ok(out.startsWith('<svg><script>' + GUARD.replace(/&/g, '&amp;').replace(/</g, '&lt;')), out);
+    assert.ok(!/<script>[^<]*&&/.test(out), out);
+  });
+});
+
+describe('javascript: URLs run their percent-decoded text', () => {
+  it('rewrites location hidden behind a percent-encoded quote', () => {
+    assert.strictEqual(
+      rwd('<a href="javascript:alert(%22it\'s%22);location.reload()">'),
+      '<a href="javascript:alert(&quot;it\'s&quot;);__pLocation.reload()">'
+    );
+  });
+
+  it('keeps literal percent signs, tabs and newlines meaning what they did', () => {
+    assert.strictEqual(
+      rwd('<a href="javascript:location.href=%22/x?a=%2541%22">'),
+      '<a href="javascript:__pLocation.href=&quot;/x?a=%2541&quot;">'
+    );
+    assert.strictEqual(rwd('<a href="javascript:loca&#10;tion.reload()">'), '<a href="javascript:__pLocation.reload()">');
+    assert.strictEqual(rwd('<a href="javascript:void(0)%3B">'), '<a href="javascript:void(0)%3B">');
+  });
+});
+
+describe('legacy encodings (pages passed through as latin1)', () => {
+  // Shift_JIS bytes as the proxy hands them over: one character per byte.
+  const sjis = (bytes) => Buffer.from(bytes).toString('latin1');
+  const KENSAKU = sjis([0x8c, 0x9f, 0x8d, 0xf5]); // 検索
+
+  it('keeps non-ASCII URL characters as they are for the browser to encode', () => {
+    assert.strictEqual(rw(`<a href="/s?q=${KENSAKU}">`), `<a href="${P}/s?q=${KENSAKU}">`);
+    assert.strictEqual(rw(`<img src="/i/${KENSAKU}.png" srcset="${KENSAKU}.png 2x">`), `<img src="${P}/i/${KENSAKU}.png" srcset="${P}/dir/${KENSAKU}.png 2x">`);
+    assert.strictEqual(rw(`<p style="background:url(/b/${KENSAKU}.png)">`), `<p style="background:url(&quot;${P}/b/${KENSAKU}.png&quot;)">`);
+    assert.strictEqual(rw(`<a href="//${KENSAKU}.example/x">`), `<a href="/p/https://${KENSAKU}.example/x">`);
+  });
+
+  it('round-trips the page bytes', () => {
+    const bytes = Buffer.concat([Buffer.from('<a href="/'), Buffer.from([0x95, 0x5c, 0x82, 0xa0]), Buffer.from('" onclick="location.reload()">')]);
+    const out = Buffer.from(rwd(bytes.toString('latin1')), 'latin1');
+    assert.ok(out.includes(Buffer.concat([Buffer.from(`${P}/`), Buffer.from([0x95])])), out.toString('latin1'));
+  });
+
+  it('writes characters that came from references back as references, never as raw bytes', () => {
+    assert.strictEqual(rw('<a href="/caf&eacute;?q=&#x691C;">'), `<a href="${P}/caf&#233;?q=&#26908;">`);
+    assert.strictEqual(rwd('<a onclick="x(\'&nbsp;\');location.reload()">'), '<a onclick="x(\'&#160;\');__pLocation.reload()">');
+  });
+
+  it('keeps import map escapes as escapes', () => {
+    const out = rwd('<script type="importmap">{"imports":{"a":"/caf\\u00e9.js"}}</script>');
+    assert.ok(out.includes(`"a":"${P}/caf\\u00e9.js"`), out);
+  });
+});
+
+describe('client-side template placeholders', () => {
+  it('leaves URLs with {{ }}, [[ ]] or ${ } alone so frameworks can still fill them in', () => {
+    for (const src of [
+      '<a href="/item/{{item.id}}">', '<img src="{{ img }}">', '<img src="[[item.image]]">', '<a href="/u/${id}">',
+      '<img srcset="{{a}} 1x, {{b}} 2x">', '<p style="background:url({{bg}})">',
+    ]) {
+      assert.strictEqual(rw(src), src);
+    }
+  });
+
+  it('still rewrites URLs that only contain braces', () => {
+    assert.strictEqual(rw('<a href="/a{b}">'), `<a href="${P}/a%7Bb%7D">`);
+  });
+});
+
+describe('attributes that only matter on some elements', () => {
+  it('rewrites srcdoc only on <iframe>', () => {
+    assert.strictEqual(rw('<x-frame srcdoc="&lt;a href=/x&gt;"></x-frame>'), '<x-frame srcdoc="&lt;a href=/x&gt;"></x-frame>');
+    assert.strictEqual(rw('<iframe srcdoc="&lt;a href=/x&gt;"></iframe>'), `<iframe srcdoc="&lt;a href=&quot;${P}/x&quot;>"></iframe>`);
+  });
+});
+
+describe('import maps', () => {
+  it('keeps a "__proto__" specifier as a key', () => {
+    const out = rwd('<script type="importmap">{"imports":{"__proto__":"/p.js","a":"/a.js"}}</script>');
+    const json = JSON.parse(out.slice(out.indexOf('>') + 1, out.lastIndexOf('</script>')));
+    assert.deepStrictEqual(Object.keys(json.imports), ['__proto__', 'a']);
+    assert.strictEqual(Object.getOwnPropertyDescriptor(json.imports, '__proto__').value, `${P}/p.js`);
+  });
+});
+
+describe('fetched responses that are not markup', () => {
+  it('leaves JSON served as text/html alone when no runtime is injected', () => {
+    const json = JSON.stringify({ html: '<img src="/a.png"> <a href=\'/b\'>b</a>', items: [1, 2] });
+    assert.strictEqual(rw(json), json);
+    assert.strictEqual(rw(' \n[{"a":"<a href=\\"/x\\">"}]'), ' \n[{"a":"<a href=\\"/x\\">"}]');
+  });
+
+  it('still rewrites markup that only starts like JSON, and documents', () => {
+    assert.strictEqual(rw('[x] <a href="/x">'), `[x] <a href="${P}/x">`);
+    const out = rwd('{"a":"<a href=\\"/x\\">"}');
+    assert.ok(out.includes(P), out);
+  });
+});
+
+describe('markup a page saved from its own (rewritten) DOM', () => {
+  it('does not wrap proxied URLs a second time', () => {
+    assert.strictEqual(rw('<img src="/p/https://cdn.example/a.png">'), '<img src="/p/https://cdn.example/a.png">');
+    assert.strictEqual(rw('<a href=" /p/http://o.example/x?y">'), '<a href=" /p/http://o.example/x?y">');
+    assert.strictEqual(rw('<p style="background:url(/p/https://c.example/b.png)">'), '<p style="background:url(/p/https://c.example/b.png)">');
+    // A path that merely starts with /p/ is the site's own.
+    assert.strictEqual(rw('<a href="/p/x">'), `<a href="${P}/p/x">`);
+  });
+
+  it('leaves JSON behind an anti-hijacking prefix alone', () => {
+    for (const body of [")]}'\n{\"a\":\"<img src=\\\"/x\\\">\"}", ")]}',\n[\"<a href='/x'>\"]", 'while(1);["<a href=/x>"]', 'for(;;);{"a":"<a href=/x>"}']) {
+      assert.strictEqual(rw(body), body);
+    }
+  });
+});
+
+describe('a late <base> and loads Chromium defers', () => {
+  it('applies the final base to plugins, image inputs, SVG images, media and backgrounds', () => {
+    const out = rw('<object data=o1></object><embed src=e1><input type=image src=n1><svg><image href=s1 /><image xlink:href=x1 /></svg>' +
+      '<video src=v1 poster=p1><source src=so1><track src=t1></video><audio src=a1></audio><body background=b1>' +
+      '<img src=i1><iframe src=f1></iframe><script src=j1></script><link rel=stylesheet href=c1><svg><use href=u1#x /></svg><base href=sub/>');
+    const at = (u) => `${P}/dir/sub/${u}`;
+    const early = (u) => `${P}/dir/${u}`;
+    for (const u of ['o1', 'e1', 'n1', 's1', 'x1', 'v1', 'so1', 't1', 'a1', 'b1']) assert.ok(out.includes(`"${at(u)}"`), `${u}: ${out}`);
+    for (const u of ['p1', 'i1', 'f1', 'j1', 'c1', 'u1#x']) assert.ok(out.includes(`"${early(u)}"`), `${u}: ${out}`);
   });
 });

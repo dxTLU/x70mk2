@@ -199,3 +199,70 @@ describe('robustness', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------------------
+// Adversarial regressions.
+
+describe('legacy encodings (style sheets passed through as latin1)', () => {
+  // Shift_JIS / GBK bytes as the proxy hands them over: one character per byte.
+  const bytes = (b) => Buffer.from(b).toString('latin1');
+  const GBK = bytes([0xcd, 0xbc, 0xc6, 0xac]); // 图片
+
+  it('keeps non-ASCII URL characters for the browser to encode as it would have', () => {
+    assert.strictEqual(rc(`a{b:url(/i/${GBK}.png)}`), `a{b:url("${P}/i/${GBK}.png")}`);
+    assert.strictEqual(rc(`a{b:url("${GBK}.png?q=${GBK}")}`), `a{b:url("${P}/css/${GBK}.png?q=${GBK}")}`);
+    assert.strictEqual(rc(`@import "${GBK}.css";`), `@import "${P}/css/${GBK}.css";`);
+  });
+
+  it('round-trips the bytes of the style sheet', () => {
+    const src = Buffer.concat([Buffer.from('a{b:url(/'), Buffer.from([0x95, 0x5c, 0x82, 0xa0]), Buffer.from('.png)}')]);
+    const out = Buffer.from(rc(src.toString('latin1')), 'latin1');
+    assert.ok(out.includes(Buffer.from([0x95])) && out.includes(Buffer.from([0x82, 0xa0])), out.toString('latin1'));
+  });
+
+  it('writes characters that came from escapes back as escapes', () => {
+    assert.strictEqual(rc('a{b:url(caf\\e9 .png)}'), `a{b:url("${P}/css/caf\\e9 .png")}`);
+    assert.strictEqual(rc('a{b:url("\\691C.png")}'), `a{b:url("${P}/css/\\691c .png")}`);
+    // UTF-8 style sheets: a literal character stays literal.
+    assert.strictEqual(rc('a{b:url(café.png)}'), `a{b:url("${P}/css/café.png")}`);
+  });
+});
+
+describe('client-side template placeholders', () => {
+  it('leaves templated URLs alone', () => {
+    for (const css of ['a{b:url({{img}})}', 'a{b:url("[[bg]]")}', 'a{b:url(/u/${id}.png)}']) assert.strictEqual(rc(css), css);
+  });
+
+  it('stays linear on many unclosed placeholders', () => {
+    const css = 'a{b:url("' + '{{'.repeat(500000) + '")}';
+    const t0 = process.hrtime.bigint();
+    rc(css);
+    const ms = Number(process.hrtime.bigint() - t0) / 1e6;
+    assert.ok(ms < 1000, `${ms.toFixed(0)} ms`);
+  });
+});
+
+describe('proxifyUrl', () => {
+  const { proxifyUrl } = require('../src/rewrite-css');
+
+  it('behaves like proxify for ASCII URLs', () => {
+    assert.strictEqual(proxifyUrl('/a b?c#d', BASE), `${P}/a%20b?c#d`);
+    assert.strictEqual(proxifyUrl('#frag', BASE), '#frag');
+    assert.strictEqual(proxifyUrl('data:x', BASE), 'data:x');
+    assert.strictEqual(proxifyUrl(null, BASE), null);
+  });
+
+  it('keeps non-ASCII characters in every part of the URL', () => {
+    assert.strictEqual(proxifyUrl('//例え.jp/パス?q=値#断片', BASE), '/p/https://例え.jp/パス?q=値#断片');
+    assert.strictEqual(proxifyUrl('../é/./x/../ü', BASE), `${P}/é/ü`);
+  });
+
+  it('is not fooled by text that looks like its placeholders', () => {
+    assert.strictEqual(proxifyUrl('/_zq0_/é', BASE), `${P}/_zq0_/%C3%A9`);
+  });
+
+  it('treats a non-ASCII "scheme" as the relative path it is', () => {
+    assert.strictEqual(proxifyUrl('😀:x', BASE), `${P}/css/😀:x`);
+    assert.strictEqual(proxifyUrl('ht😀tp://x', BASE), `${P}/css/ht😀tp://x`);
+  });
+});

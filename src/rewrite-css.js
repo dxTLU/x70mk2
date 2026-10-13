@@ -1,6 +1,6 @@
 'use strict';
 
-const { proxify } = require('./urls');
+const { proxify, isProxiedPath } = require('./urls');
 
 /*
  * CSS URL rewriter.
@@ -17,6 +17,67 @@ const STRING_URL_FNS = new Set(['image-set', '-webkit-image-set', '-moz-image-se
 
 // Cheap pre-check: style sheets without any of these cannot contain a URL we rewrite.
 const MAYBE_URL = /url|import|image-set|src|\\/i;
+
+const NON_ASCII = /[^\0-\x7f]/;
+const NON_ASCII_ALL = /[^\0-\x7f]/gu;
+// Stand-ins for non-ASCII runs while a URL is parsed: "_", lowercase letters and digits, which
+// the URL parser leaves unchanged in every component (hosts are lowercased), and which cannot
+// start a scheme ("é:x" is a relative path, so must its stand-in be).
+const HELD = /_zq(\d+)_/g;
+const HELD_ONE = /_zq\d+_/;
+
+/** Holds a client-side template placeholder: {{x}} (Angular, Vue, Mustache), [[x]] (Polymer), ${x}. */
+function isTemplate(s) {
+  const pair = (open, close) => {
+    const k = s.indexOf(open);
+    return k !== -1 && s.indexOf(close, k + 2) !== -1;
+  };
+  return pair('{{', '}}') || pair('[[', ']]') || pair('${', '}');
+}
+
+/**
+ * proxify() for URLs found in documents and style sheets.
+ *
+ * Characters outside ASCII stay as they are instead of being percent-encoded as UTF-8: the page
+ * may be in a legacy encoding that the proxy passes through byte for byte (Shift_JIS, GBK,
+ * windows-1251...), and left alone the browser encodes them exactly as it would have for the
+ * original URL (paths and hosts as UTF-8, queries in the page's own encoding).
+ *
+ * URLs holding client-side template placeholders are left alone, so the framework or script
+ * can still substitute them; the runtime proxies whatever URL they produce. So are URLs that
+ * are proxied already (markup a page saved from its own DOM, e.g. a rich-text editor): wrapped
+ * twice they would ask the site for "/p/https://...".
+ */
+function proxifyUrl(raw, base) {
+  if (raw == null) return raw;
+  const s = String(raw);
+  if (isTemplate(s) || isProxiedPath(s.replace(/^[\0- ]+/, ''))) return raw;
+  if (!NON_ASCII.test(s) || HELD_ONE.test(s) || HELD_ONE.test(base)) return proxify(s, base);
+  const held = [];
+  const masked = s.replace(/[^\0-\x7f]+/g, (m) => '_zq' + (held.push(m) - 1) + '_');
+  const out = proxify(masked, base);
+  if (out === masked) return raw;
+  return out.replace(HELD, (m, k) => (k < held.length ? held[k] : m));
+}
+
+/**
+ * Non-ASCII characters of `text` that do not appear literally in `source` (they came from an
+ * escape or a character reference) are passed to `escape`; the others are kept, so bytes of a
+ * legacy-encoded page round-trip unchanged and escaped characters stay escaped.
+ */
+function keepSourceChars(text, source, escape) {
+  source = String(source || '');
+  // Without a reference ("&") or an escape ("\\") every character was written literally.
+  if (!NON_ASCII.test(text) || (source.indexOf('&') === -1 && source.indexOf('\\') === -1)) return text;
+  let chars = null;
+  return text.replace(NON_ASCII_ALL, (c) => {
+    if (!chars) {
+      chars = new Set();
+      for (const ch of source) if (ch.charCodeAt(0) > 0x7f) chars.add(ch);
+    }
+    return chars.has(c) ? c : escape(c);
+  });
+}
 
 function isWs(c) {
   return c === 32 || c === 9 || c === 10 || c === 13 || c === 12;
@@ -189,8 +250,12 @@ function readUrl(s, i) {
   return '';
 }
 
-function quote(url) {
-  return '"' + url.replace(/["\\\n\r\f]/g, (c) => (c === '"' || c === '\\' ? '\\' + c : '\\' + c.charCodeAt(0).toString(16) + ' ')) + '"';
+const cssEscape = (c) => '\\' + c.codePointAt(0).toString(16) + ' ';
+
+/** A CSS string for a rewritten URL; `source` is the token it replaces (see keepSourceChars). */
+function quote(url, source) {
+  const s = url.replace(/["\\\n\r\f]/g, (c) => (c === '"' || c === '\\' ? '\\' + c : cssEscape(c)));
+  return '"' + keepSourceChars(s, source, cssEscape) + '"';
 }
 
 /**
@@ -213,7 +278,7 @@ function rewriteCss(css, base) {
 
   const urlFor = (raw) => {
     if (atRule === 'namespace') return null;
-    const p = proxify(raw, base);
+    const p = proxifyUrl(raw, base);
     return p == null || p === raw ? null : p;
   };
   const replace = (from, to, text) => {
@@ -238,7 +303,7 @@ function rewriteCss(css, base) {
       const isUrl = fn === null ? atRule === 'import' : fn === 'url' || STRING_URL_FNS.has(fn);
       if (isUrl && tokOk) {
         const p = urlFor(value);
-        if (p) replace(start, i, quote(p));
+        if (p) replace(start, i, quote(p, css.slice(start, i)));
       }
       if (fn === 'url') fns[fns.length - 1] = 'url-done';
       if (atRule === 'import' && (fn === null || fn === 'url')) atRule = 'imported';
@@ -310,7 +375,7 @@ function rewriteCss(css, base) {
       i = tokEnd;
       if (tokOk && value) {
         const p = urlFor(value);
-        if (p) replace(start, i, 'url(' + quote(p) + ')');
+        if (p) replace(start, i, 'url(' + quote(p, css.slice(start, i)) + ')');
       }
       if (atRule === 'import') atRule = 'imported';
       continue;
@@ -322,4 +387,4 @@ function rewriteCss(css, base) {
   return last === 0 ? css : out + css.slice(last);
 }
 
-module.exports = { rewriteCss };
+module.exports = { rewriteCss, proxifyUrl, keepSourceChars };

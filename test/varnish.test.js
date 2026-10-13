@@ -121,6 +121,7 @@ const IMAGES = {
 
 describe('Varnish in front of the app', { skip: VARNISHD ? false : 'varnishd is not installed' }, () => {
   const hits = new Map(); // origin path -> requests that reached the origin
+  const marks = {}; // when the origin did something, for streaming checks
   const last = new Map(); // origin path -> last request seen there
   let tmp, origin, originPort, app, appPort, varnish, varnishPort, proxyProtoPort;
   let appLog = '', varnishLog = '';
@@ -190,7 +191,10 @@ describe('Varnish in front of the app', { skip: VARNISHD ? false : 'varnishd is 
       case '/events':
         res.writeHead(200, { 'content-type': 'text/event-stream', 'cache-control': 'no-cache' });
         res.write('data: one\n\n');
-        setTimeout(() => res.end('data: two\n\n'), 1500);
+        setTimeout(() => {
+          marks.sseSecond = Date.now();
+          res.end('data: two\n\n');
+        }, 1500);
         return;
       case '/download/big.mp4': {
         // Known length, bigger than the cache: the first megabyte, a pause, then the rest.
@@ -204,7 +208,10 @@ describe('Varnish in front of the app', { skip: VARNISHD ? false : 'varnishd is 
           }
           res.end();
         };
-        setTimeout(pump, 500);
+        setTimeout(() => {
+          marks.bigResumed = Date.now();
+          pump();
+        }, 500);
         return;
       }
       case '/download/stream.webm': {
@@ -307,6 +314,13 @@ describe('Varnish in front of the app', { skip: VARNISHD ? false : 'varnishd is 
   const DOC = (cookie, extra = {}) => ({ ...(cookie ? { cookie } : {}), 'sec-fetch-dest': 'document', 'sec-fetch-mode': 'navigate', 'sec-fetch-site': 'none', ...extra });
   const count = (pathname) => hits.get(pathname) || 0;
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  async function waitFor(cond, ms) {
+    const deadline = Date.now() + ms;
+    while (!cond()) {
+      if (Date.now() > deadline) throw new Error('timed out waiting for ' + cond);
+      await sleep(25);
+    }
+  }
 
   function waitHttp(port, pathname, ms, proc, what) {
     const start = Date.now();
@@ -585,7 +599,8 @@ describe('Varnish in front of the app', { skip: VARNISHD ? false : 'varnishd is 
     const stale = await request(p('/short.css'), { headers: h });
     assert.strictEqual(stale.status, 200);
     assert.strictEqual(stale.text, first.text);
-    await sleep(300);
+    // The stale copy triggered a background refresh: a conditional request through the app.
+    await waitFor(() => (last.get('/short.css').headers['if-none-match'] === '"v1"'), 5000);
     const fresh = await request(p('/short.css'), { headers: h });
     assert.strictEqual(fresh.headers['x-cache'], 'HIT');
     assert.strictEqual(fresh.text, first.text);
@@ -643,16 +658,15 @@ describe('Varnish in front of the app', { skip: VARNISHD ? false : 'varnishd is 
           assert.match(res.headers['content-type'], /^text\/event-stream/);
           assert.strictEqual(res.headers['content-encoding'], undefined);
           res.setEncoding('utf8');
-          res.on('data', (d) => got.push([Date.now() - started, d]));
+          res.on('data', (d) => got.push([Date.now(), d]));
           res.on('end', () => resolve(got));
         }).on('error', reject);
       });
       const text = events.map((e) => e[1]).join('');
       assert.strictEqual(text, 'data: one\n\ndata: two\n\n');
-      // The first event arrived well before the origin sent the second one.
+      // The first event reached the client before the origin even sent the second one.
       assert.ok(events[0][1].startsWith('data: one'), JSON.stringify(events));
-      assert.ok(events[0][0] < 1000, `first event after ${events[0][0]}ms`);
-      assert.ok(events.at(-1)[0] >= 1400, JSON.stringify(events));
+      assert.ok(events[0][0] < marks.sseSecond, `first event ${marks.sseSecond - events[0][0]}ms before the second was sent`);
     });
   }
 
@@ -661,24 +675,23 @@ describe('Varnish in front of the app', { skip: VARNISHD ? false : 'varnishd is 
     for (const [pathname, size] of [['/download/big.mp4', BIG], ['/download/stream.webm', 40 * CHUNK.length]]) {
       const before = count(pathname);
       for (let i = 0; i < 2; i++) {
-        const { bytes, firstByteAt, endAt } = await new Promise((resolve, reject) => {
-          const started = Date.now();
+        const { bytes, firstByteAt } = await new Promise((resolve, reject) => {
           let bytes = 0;
           let firstByteAt = null;
           http.get({ host: '127.0.0.1', port: varnishPort, path: p(pathname), headers: { cookie: s }, agent: false }, (res) => {
             assert.strictEqual(res.statusCode, 200);
             res.on('data', (c) => {
-              if (firstByteAt === null) firstByteAt = Date.now() - started;
+              if (firstByteAt === null) firstByteAt = Date.now();
               bytes += c.length;
             });
-            res.on('end', () => resolve({ bytes, firstByteAt, endAt: Date.now() - started }));
+            res.on('end', () => resolve({ bytes, firstByteAt }));
             res.on('error', reject);
           }).on('error', reject);
         });
         assert.strictEqual(bytes, size, pathname);
         if (pathname === '/download/big.mp4') {
-          // The origin pauses for 500ms after the first megabyte: bytes must flow before that.
-          assert.ok(firstByteAt < 450 && endAt >= 500, `first byte ${firstByteAt}ms, end ${endAt}ms`);
+          // The origin pauses after the first megabyte: bytes must reach the client before it goes on.
+          assert.ok(firstByteAt < marks.bigResumed, 'the first bytes waited for the rest of the file');
         }
       }
       assert.strictEqual(count(pathname) - before, 2, `${pathname} is not cached`);

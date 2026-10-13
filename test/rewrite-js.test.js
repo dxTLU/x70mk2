@@ -432,6 +432,28 @@ const CASES = {
     ['debugger; location', 'debugger; __pLocation'],
     ['x = 0x1F / location + 1_000n / location + .5e-3 / location', 'x = 0x1F / __pLocation + 1_000n / __pLocation + .5e-3 / __pLocation'],
   ],
+
+  // ES2019 optional catch binding, as emitted by terser/esbuild/swc for modern targets: the
+  // `{` after `catch` is a block, never an object literal.
+  'optional catch binding': [
+    ['try{a()}catch{b,location}', 'try{a()}catch{b,__pLocation}'],
+    ['try{}catch{x=1,location=2}', 'try{}catch{x=1,__pLocation=2}'],
+    ['try{}catch{location}', 'try{}catch{__pLocation}'],
+    ["try{a()}catch{}/'/.test(s);location.href=1", "try{a()}catch{}/'/.test(s);__pLocation.href=1"],
+    ['try{a()}catch{}/`/.test(s);location.href=1', 'try{a()}catch{}/`/.test(s);__pLocation.href=1'],
+    ['try{a()}catch{}/[{(]/.test(s);x={location}', 'try{a()}catch{}/[{(]/.test(s);x={location:__pLocation}'],
+    ['try{}catch{location:for(;;){break location}}', 'try{}catch{__pLocation:for(;;){break __pLocation}}'],
+    ['try{}catch{function f(){}/location/.test(s)}', 'try{}catch{function f(){}/location/.test(s)}'],
+    ['try {\n  a()\n} catch {\n  location.reload(), location\n}', 'try {\n  a()\n} catch {\n  __pLocation.reload(), __pLocation\n}'],
+    ['p.catch({location})', 'p.catch({location:__pLocation})'],
+  ],
+
+  'class bodies: operators that look like member prefixes': [
+    ['class A { x = a\n* location }', 'class A { x = a\n* __pLocation }'],
+    ['class A { x = a\n*location(1) }', 'class A { x = a\n*__pLocation(1) }'],
+    same('class A { x = a;\n*location() {} }'),
+    same('class A { *location() {} static *location() {} }'),
+  ],
 };
 
 for (const [group, cases] of Object.entries(CASES)) {
@@ -781,4 +803,79 @@ test('performance: a 3 MB minified bundle rewrites in under 300 ms', (t) => {
   t.diagnostic(`${(bundle.length / 1048576).toFixed(2)} MB: ${times.map((x) => x.toFixed(0)).join(' / ')} ms`);
   assert.ok(Math.min(...times) < 300, 'rewrite took ' + times.join(', ') + ' ms');
   assert.equal(scriptError(out), null);
+});
+
+// --- adversarial input: the server rewrites on its event loop, so no input may go superlinear --
+
+test('hostile input: no quadratic rescans or deep recursion', () => {
+  const cases = {
+    // every `/` after `[` starts a regex scan that fails at the end of one long line
+    'unterminated regex classes': 'x=location;' + '/['.repeat(150000),
+    'unterminated regexes in brackets': 'x=location;' + '(/['.repeat(100000),
+    // many keys of one destructuring pattern, each re-checking a huge last element for `...rest`
+    'pattern keys before a huge default': '({' + 'location:a,'.repeat(20000) + 'z=' + '1+'.repeat(150000) + '1}=o)',
+    'pattern keys before a huge template': '({' + 'location:a,'.repeat(20000) + 'z=`' + '${a}'.repeat(100000) + '`}=o)',
+    // generator-star chains used to recurse once per `*`
+    'star chain in a class body': 'class A{' + '* '.repeat(300000) + 'location}',
+  };
+  for (const [name, src] of Object.entries(cases)) {
+    const t0 = Date.now();
+    const out = rewriteJs(src);
+    const ms = Date.now() - t0;
+    assert.equal(typeof out, 'string', name);
+    assert.ok(out.includes('__pLocation'), name);
+    assert.ok(ms < 1500, `${name}: ${(src.length / 1024).toFixed(0)} KB took ${ms} ms`);
+  }
+});
+
+// Script text can be rewritten twice: the server rewrites JS fetched with fetch()/XHR (by its
+// content type), and the client runtime rewrites it again when the page evals it or inserts it
+// as a <script>. The second pass must be a no-op, or modules end up with duplicate exports.
+test('rewriteJs is idempotent, including module export twins', () => {
+  const sources = [
+    ['let location; export { location }', 'module'],
+    ['export const location = 1', 'module'],
+    ['export const {location} = o', 'module'],
+    ['export { location } from "x"', 'module'],
+    ['let a; export { a as location }', 'module'],
+    ['let location; export { location as location }', 'module'],
+    ['export { default as location } from "x"', 'module'],
+    ['import { location } from "x"; export { location }', 'module'],
+    ['x = {location}; const {location: l, ...r} = o; eval(location); class A { location = location }', 'script'],
+  ];
+  const problems = [];
+  const mods = [];
+  for (const [src, mode] of sources) {
+    const once = rewriteJs(src);
+    const twice = rewriteJs(once);
+    if (twice !== once) problems.push(`${JSON.stringify(src)}\n    once:  ${JSON.stringify(once)}\n    twice: ${JSON.stringify(twice)}`);
+    if (mode === 'module') mods.push(twice);
+    else if (scriptError(twice)) problems.push(`does not parse: ${JSON.stringify(twice)}`);
+    const guarded = rewriteScript(src);
+    if (rewriteScript(guarded) !== guarded) problems.push(`rewriteScript not idempotent: ${JSON.stringify(src)}`);
+  }
+  moduleErrors(mods).forEach((err, k) => { if (err) problems.push(`${err}: ${JSON.stringify(mods[k])}`); });
+  assert.ok(problems.length === 0, '\n' + problems.join('\n'));
+});
+
+// The @@unscopables object the GUARD hands to `with` scopes must not inherit from
+// Object.prototype: an inherited `toString`/`constructor`/`valueOf` is truthy and would hide the
+// with-object's own members of those names (lodash/underscore/EJS templates use `with (obj)`).
+test('GUARD: with-scopes still see their own Object.prototype-named members', () => {
+  const code = 'var obj = { toString: function () { return "mine" }, constructor: "ctor", valueOf: function () { return 42 },' +
+    ' hasOwnProperty: function () { return "own" }, isPrototypeOf: 1, propertyIsEnumerable: 2, toLocaleString: 3, location: { pathname: "/own" } };' +
+    'var r; with (obj) { r = [toString(), constructor, valueOf(), hasOwnProperty("x"), isPrototypeOf, propertyIsEnumerable, toLocaleString, __pLocation.pathname] } r';
+  const plain = vm.createContext({});
+  const expected = read(plain, '(function () { ' + code.replace('__pLocation', 'location') + '; return r })()');
+  const guarded = vm.createContext({});
+  vm.runInContext(GUARD, guarded);
+  assert.deepEqual(read(guarded, '(function () { ' + code + '; return r })()'), expected);
+  // a template engine in the style of _.template: data fields named like Object.prototype members
+  const tpl = 'var data = { constructor: "C", name: "n" }; var out; with (data) { out = name + "/" + constructor } out';
+  assert.equal(vm.runInContext(GUARD + tpl, vm.createContext({})), 'n/C');
+  // arrays carry their own (null-prototype) @@unscopables: `with (array)` must not capture it
+  const arr = vm.createContext({});
+  vm.runInContext('var location = { pathname: "/real" };' + GUARD, arr);
+  assert.equal(vm.runInContext('with ([1, 2]) { __pLocation.pathname + length }', arr), '/real2');
+  assert.equal(vm.runInContext('Object.keys(Array.prototype[Symbol.unscopables]).includes("__pLocation")', arr), false);
 });

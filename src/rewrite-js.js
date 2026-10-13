@@ -42,15 +42,17 @@
   // rewriting it again is harmless. The @@unscopables entries stop object scopes from capturing
   // `__pLocation` (every object inherits it): `with (obj)` unless obj really has a `location`,
   // and the element/form/document scopes of inline event handlers, where the bare name must
-  // reach the window as `location` does.
+  // reach the window as `location` does. That unscopables object has a null prototype: an
+  // inherited `toString` or `constructor` would be truthy and hide the with-object's own.
   const GUARD =
     'if(!Object.prototype.hasOwnProperty("__pLocation"))try{Object.defineProperty(Object.prototype,"__pLocation",' +
     '{configurable:true,get:function(){return this["location"]},set:function(v){this["location"]=v}})}catch(e){}' +
     '(function(G,O,U){function d(o,k,v){try{Object.defineProperty(o,k,v)}catch(e){}}' +
     'if(typeof G.__pRewriteJs!="function")d(G,"__pRewriteJs",{configurable:true,writable:true,value:function(s){return s}});' +
-    'if(U&&!O.hasOwnProperty(U))d(O,U,{configurable:true,get:function(){var o=this;return{get __pLocation(){return!("location"in o)}}}});' +
-    '["Element","Document","DocumentFragment","CharacterData","DocumentType"].forEach(function(n){try{' +
-    'var u=Object.getOwnPropertyDescriptor(G[n].prototype,U);if(typeof u.value=="object")u.value.__pLocation=true}catch(e){}})' +
+    'if(U&&!O.hasOwnProperty(U))d(O,U,{configurable:true,get:function(){var o=this;return{__proto__:null,get __pLocation(){return!("location"in o)}}}});' +
+    '["Array","Element","Document","DocumentFragment","CharacterData","DocumentType"].forEach(function(n){try{' +
+    'var u=Object.getOwnPropertyDescriptor(G[n].prototype,U).value;' +
+    'if(typeof u=="object"&&!O.hasOwnProperty.call(u,"__pLocation"))d(u,"__pLocation",{configurable:true,value:true})}catch(e){}})' +
     '})(typeof globalThis!="undefined"?globalThis:self,Object.prototype,typeof Symbol=="function"&&Symbol.unscopables);';
 
   // Token types. Punctuators get their own types so a single array describes every token.
@@ -80,7 +82,7 @@
   const word = (w) => WORD_CODE.get(w);
   // `location` and `eval` must keep the two lowest codes (see `a <= W_EVAL` below).
   const W_LOCATION = word('location'), W_EVAL = word('eval'), W_AS = word('as'), W_ASYNC = word('async'),
-    W_AWAIT = word('await'), W_CLASS = word('class'), W_DEFAULT = word('default'), W_DO = word('do'),
+    W_AWAIT = word('await'), W_CATCH = word('catch'), W_CLASS = word('class'), W_DEFAULT = word('default'), W_DO = word('do'),
     W_ELSE = word('else'), W_EXPORT = word('export'), W_FINALLY = word('finally'), W_FOR = word('for'),
     W_FROM = word('from'), W_FUNCTION = word('function'), W_GET = word('get'), W_IF = word('if'),
     W_IMPORT = word('import'), W_IN = word('in'), W_NEW = word('new'), W_OF = word('of'), W_RETURN = word('return'),
@@ -190,17 +192,27 @@
     return n;
   }
 
+  // A failed regex scan runs to the end of the line, and every later `/` on that line may start
+  // another one: hostile input like `/[/[/[...` on one long line would cost quadratic time. The
+  // scan is a pure function of (position, inside a class), so failures are remembered per state
+  // (bit 1: outside a class, bit 2: inside) and a later scan stops as soon as it joins a known
+  // failing path. Allocated on the first long failure only.
+  let regexFail = null;
+  const REGEX_FAIL_MEMO_MIN = 64;
+
   /** End of a regex literal whose body starts at i (just past the `/`), or -1 if there is none. */
   function scanRegex(src, i, n) {
+    const s = i;
     let inClass = false;
     while (i < n) {
+      if (regexFail !== null && (regexFail[i] & (inClass ? 2 : 1)) !== 0) break;
       const c = src.charCodeAt(i);
       if (c === 92) {
-        if (isLineBreak(src.charCodeAt(i + 1))) return -1;
+        if (isLineBreak(src.charCodeAt(i + 1))) break;
         i += 2;
         continue;
       }
-      if (isLineBreak(c)) return -1;
+      if (isLineBreak(c)) break;
       if (inClass) {
         if (c === 93) inClass = false;
       } else if (c === 91) {
@@ -212,7 +224,22 @@
       }
       i++;
     }
+    if (i - s >= REGEX_FAIL_MEMO_MIN) markRegexFail(src, s, Math.min(i, n), n);
     return -1;
+  }
+
+  // Replay the failed scan from s up to where it stopped, recording each state it passed through.
+  function markRegexFail(src, i, stop, n) {
+    if (regexFail === null) regexFail = new Uint8Array(n + 1);
+    let inClass = false;
+    while (i < stop) {
+      regexFail[i] |= inClass ? 2 : 1;
+      const c = src.charCodeAt(i);
+      if (c === 92) { i += 2; continue; }
+      if (inClass) { if (c === 93) inClass = false; }
+      else if (c === 91) inClass = true;
+      i++;
+    }
   }
 
   /** End of a numeric literal; `fraction` when its leading `.` was already consumed (`.5`). */
@@ -261,7 +288,7 @@
    * (they start zeroed), and the state lives in this scope rather than in closures created per
    * call, which would hand the optimizer a new call target (and a deopt) on every call.
    */
-  let N = 0, cap = 0;
+  let N = 0, cap = 0, srcLen = 0;
   let start, parent, match, type, aux, nlb;
   let stack = new Int32Array(64), tern = new Int32Array(64), sp = 1;
   let nl = true; // a line break precedes the next token (input start counts, for `-->`)
@@ -270,12 +297,26 @@
   let classCand = -1, classCandExpr = false; // a `class` keyword awaiting its name / body
   const classAt = [], classIsExpr = []; // depths of class heads still waiting for their body (0/1: expression)
 
+  function grow32(a, size) { const b = new Int32Array(size); b.set(a); return b; }
+  function grow8(a, size) { const b = new Uint8Array(size); b.set(a); return b; }
+  // Only very dense input (`;;;;`, `[0,1,0,...]`) outgrows the initial n/2 estimate: size the
+  // arrays from the density so far rather than doubling, which would peak at 3x the need.
   function grow() {
-    cap = cap * 2;
-    const g32 = (a) => { const b = new Int32Array(cap); b.set(a); return b; };
-    const g8 = (a) => { const b = new Uint8Array(cap); b.set(a); return b; };
-    start = g32(start); parent = g32(parent); match = g32(match);
-    type = g8(type); aux = g8(aux); nlb = g8(nlb);
+    const seen = start[N - 1] + 1;
+    const est = Math.ceil((N / seen) * srcLen * 1.05) + 64;
+    cap = Math.min(Math.max(est, Math.ceil(cap * 1.25)), srcLen + 64);
+    start = grow32(start, cap); parent = grow32(parent, cap); match = grow32(match, cap);
+    type = grow8(type, cap); aux = grow8(aux, cap); nlb = grow8(nlb, cap);
+  }
+
+  // Bracket nesting deeper than this cannot be parsed by any engine (V8 gives up after a few
+  // thousand levels), so such input is returned untouched instead of growing the stacks without
+  // bound: 32 MB of `(` would otherwise cost about a gigabyte.
+  const MAX_DEPTH = 1 << 18;
+  const TOO_DEEP = new RangeError('nesting too deep');
+
+  function release() {
+    start = parent = match = type = aux = nlb = regexFail = null; // do not pin the last input's arrays
   }
 
   // Kept tiny so the optimizer inlines it at every call site.
@@ -299,6 +340,7 @@
 
   function open(idx) {
     if (sp === stack.length) {
+      if (sp >= MAX_DEPTH) throw TOO_DEEP;
       const s2 = new Int32Array(sp * 2); s2.set(stack); stack = s2;
       const t2 = new Int32Array(sp * 2); t2.set(tern); tern = t2;
     }
@@ -368,7 +410,8 @@
       }
       case T_NAME: {
         const k = aux[p];
-        if (k === W_ELSE || k === W_TRY || k === W_FINALLY || k === W_DO) return B_BLOCK;
+        // `catch {` is the optional catch binding (ES2019), which modern minifiers emit
+        if (k === W_ELSE || k === W_TRY || k === W_FINALLY || k === W_DO || k === W_CATCH) return B_BLOCK;
         if (k === W_RETURN || k === W_YIELD) return nl ? B_BLOCK : B_OBJECT;
         if (k === W_IMPORT || k === W_EXPORT) return B_MODULE;
         if (k === W_STATIC) {
@@ -392,6 +435,7 @@
   function tokenize(src) {
     const n = src.length;
     N = 0;
+    srcLen = n;
     cap = (n >> 1) + 64; // minified code runs ~0.45 tokens/char; untouched pages cost nothing
     start = new Int32Array(cap); parent = new Int32Array(cap); match = new Int32Array(cap);
     type = new Uint8Array(cap); aux = new Uint8Array(cap); nlb = new Uint8Array(cap);
@@ -400,6 +444,7 @@
     nl = true;
     fnAt = -1; fnExpr = false; fnBodyAt = -1; fnBodyExpr = false;
     classCand = -1; classCandExpr = false; classAt.length = 0; classIsExpr.length = 0;
+    regexFail = null;
     const hits = [];
     let exprAllowed = true; // a `/` here starts a regex
     let hasExport = false;
@@ -692,7 +737,7 @@
     }
 
     const result = { N, start, type, aux, nlb, parent, match, hits, hasExport };
-    start = parent = match = type = aux = nlb = null; // do not pin the last input's arrays
+    release();
     return result;
   }
 
@@ -734,27 +779,62 @@
       // V8 allocates feedback vectors lazily, so the first calls of each helper record nothing.
       for (let k = 0; k < 3; k++) tokenize(PRIMER);
     }
-    const tk = tokenize(src);
+    let tk;
+    try {
+      tk = tokenize(src);
+    } catch (e) {
+      if (e !== TOO_DEEP) throw e;
+      release();
+      return src; // nested deeper than any engine can parse: it cannot run anyway
+    }
     if (tk.hits.length === 0) return src;
     const { N, start, type, aux, nlb, parent, match } = tk;
 
-    const edits = []; // { pos, end, text }; an insertion has end === pos
-    let unordered = false;
+    // Edits as parallel arrays (an insertion has end === pos). Hits are handled in source order
+    // and every edit lands at or after its hit, so these arrive sorted, except the `)` closing
+    // `eval(__pRewriteJs(...`, which is kept apart and merged in at the end. Plain arrays of
+    // numbers and shared strings keep hit-dense hostile input from costing an object per edit.
+    let E = 0, epos = new Int32Array(64), eend = new Int32Array(64);
+    const etext = [];
+    const evalCloses = [];
+    const edit = (pos, end, text) => {
+      if (E === epos.length) { epos = grow32(epos, E * 2); eend = grow32(eend, E * 2); }
+      epos[E] = pos;
+      eend[E] = end;
+      etext.push(text);
+      E++;
+    };
     let exportAlias = false;
     // Memo tables indexed by token (0: unknown, 1: no, 2: yes), allocated on first use.
-    let patternMemo = null, declMemo = null, exportPatternMemo = null;
+    let patternMemo = null, declMemo = null, exportPatternMemo = null, restMemo = null;
+    let heads = null; // template chunk -> its head token (built on first use)
 
     const isWord = (k, w) => k >= 0 && k < N && type[k] === T_NAME && aux[k] === w;
     const isDot = (k) => k >= 0 && (type[k] === P_DOT || type[k] === P_QDOT);
-    const replace = (t, text) => edits.push({ pos: start[t], end: identEnd(src, start[t]), text });
+    const replace = (t, text) => edit(start[t], identEnd(src, start[t]), text);
 
     // Index of the head token of the template literal whose last chunk (T_TMPL_TAIL) is at k.
+    // One forward pass replays the tokenizer's bracket stack, so this is O(1) per call even for
+    // malformed input where counting heads and tails backwards would not pair them up.
     function templateHead(k) {
-      for (let depth = 1, j = k - 1; j >= 0; j--) {
-        if (type[j] === T_TMPL_TAIL) depth++;
-        else if (type[j] === T_TMPL_HEAD && --depth === 0) return j;
+      if (heads === null) {
+        heads = new Int32Array(N);
+        const st = new Int32Array(N + 1);
+        let top = 0;
+        for (let j = 0; j < N; j++) {
+          const ty = type[j];
+          if (ty === P_LPAREN || ty === P_LBRACK || ty === P_LBRACE || ty === T_TMPL_HEAD) {
+            heads[j] = j;
+            st[top++] = j;
+          } else if (ty === T_TMPL_MID || ty === T_TMPL_TAIL) {
+            heads[j] = top > 0 ? heads[st[--top]] : 0;
+            if (ty === T_TMPL_MID) { st[top++] = j; }
+          } else if ((ty === P_RPAREN || ty === P_RBRACK || ty === P_RBRACE) && top > 0) {
+            top--;
+          }
+        }
       }
-      return 0;
+      return heads[k];
     }
 
     // Does this token end an operand (so a line break after it may end a statement)?
@@ -788,7 +868,8 @@
       if (pt === T_NAME && (aux[p] === W_STATIC || aux[p] === W_GET || aux[p] === W_SET || aux[p] === W_ASYNC || aux[p] === W_ACCESSOR)) {
         return !(q < N && type[q] === P_ARROW); // `x = async location => ...` is a parameter
       }
-      if (pt === P_STAR) return p - 1 === o || classMemberPos(p, o);
+      // a generator method was recognised above by its `(...) {`; otherwise this is a product
+      if (pt === P_STAR) return false;
       return nlb[t] === 1 && endsOperand(p); // after a field initializer ended by ASI
     }
 
@@ -912,19 +993,24 @@
 
     // Does object pattern `o` end in `...rest`? Renaming a key there would change what the rest
     // object receives, so such patterns keep the real `location` key.
+    // Memoized: a pattern may hold thousands of keys in front of one huge last element.
     function hasRestElement(o) {
+      if (restMemo === null) restMemo = new Uint8Array(N);
+      if (restMemo[o] !== 0) return restMemo[o] === 2;
       const c = match[o];
+      let r = false;
       for (let k = c - 1; k > o; k--) {
         const ty = type[k];
         if (ty === P_RBRACE || ty === P_RPAREN || ty === P_RBRACK) { k = match[k] > o ? match[k] : k; continue; }
         if (ty === T_TMPL_TAIL) { k = Math.max(templateHead(k), o + 1); continue; }
-        if (ty === P_ELLIPSIS) return true;
-        if (ty === P_COMMA) return false; // the rest element must be last
+        if (ty === P_ELLIPSIS) { r = true; break; }
+        if (ty === P_COMMA) break; // the rest element must be last
       }
-      return false;
+      restMemo[o] = r ? 2 : 1;
+      return r;
     }
 
-    const insert = (pos, text) => { edits.push({ pos, end: pos, text }); unordered = true; };
+    const insert = (pos, text) => edit(pos, pos, text);
     const tokenText = (k) => src.slice(start[k], type[k] === T_STR ? scanString(src, start[k] + 1, src.length, src.charCodeAt(start[k])) : identEnd(src, start[k]));
 
     // Import/export specifiers. Imports keep the remote name and rename the local binding.
@@ -940,18 +1026,41 @@
       }
       const c = match[o];
       const reexport = c >= 0 && isWord(c + 1, W_FROM); // names on the left belong to the other module
+      // Already rewritten (code can pass through twice, e.g. fetched by the server and then
+      // evaluated through the client hook): the twin exists, and adding it again would be a
+      // duplicate export. It sits in this list, or (for a local named __pLocation) comes from
+      // the declaration that our export alias points at.
+      const twin = !exportsReplacement(o);
       if (isWord(p, W_AS)) { // `x as location`: the exported name
         const local = p - 1;
         const text = !reexport && type[local] === T_NAME && aux[local] === W_LOCATION ? REPLACEMENT : tokenText(local);
-        insert(identEnd(src, start[t]), ', ' + text + ' as ' + REPLACEMENT);
+        if (twin && (reexport || text !== REPLACEMENT || aux[local] === W_LOCATION)) {
+          insert(identEnd(src, start[t]), ', ' + text + ' as ' + REPLACEMENT);
+        }
         return;
       }
       if (isWord(q, W_AS)) { // `location as x`
         if (!reexport) replace(t, REPLACEMENT);
         return;
       }
-      if (reexport) insert(identEnd(src, start[t]), ', ' + NAME + ' as ' + REPLACEMENT);
-      else replace(t, REPLACEMENT + ' as ' + NAME + ', ' + REPLACEMENT);
+      if (reexport) { if (twin) insert(identEnd(src, start[t]), ', ' + NAME + ' as ' + REPLACEMENT); }
+      else replace(t, REPLACEMENT + ' as ' + NAME + (twin ? ', ' + REPLACEMENT : ''));
+    }
+
+    // Does export list `o` already export the name __pLocation?
+    const replacementExports = new Map();
+    const isReplacement = (k) => type[k] === T_NAME && aux[k] === 0 && src.startsWith(REPLACEMENT, start[k]) &&
+      identEnd(src, start[k]) === start[k] + REPLACEMENT.length;
+    function exportsReplacement(o) {
+      let r = replacementExports.get(o);
+      if (r === undefined) {
+        r = false;
+        for (let k = o + 1, c = match[o]; k < c; k++) {
+          if (isReplacement(k) && (isWord(k - 1, W_AS) || !isWord(k + 1, W_AS))) { r = true; break; }
+        }
+        replacementExports.set(o, r);
+      }
+      return r;
     }
 
     function handleLocation(t) {
@@ -1018,28 +1127,36 @@
         if (aux[o] === B_OBJECT && objectKeyPos(t, o)) return;
         if ((aux[o] === B_CLASS || aux[o] === B_CLASS_EXPR) && classMemberPos(t, o)) return;
       }
-      edits.push({ pos: start[q] + 1, end: start[q] + 1, text: EVAL_HOOK + '(' });
-      edits.push({ pos: start[c], end: start[c], text: ')' });
-      unordered = true;
+      insert(start[q] + 1, EVAL_HOOK + '(');
+      evalCloses.push(start[c]);
     }
 
     for (const t of tk.hits) {
       if (aux[t] === W_EVAL) handleEval(t);
       else handleLocation(t);
     }
-    if (edits.length === 0) return src;
-    if (unordered) edits.sort((a, b) => a.pos - b.pos || (a.end - a.pos) - (b.end - b.pos));
+    if (E === 0) return src;
+    // Nested evals close in reverse order: sort those positions (numerically) and merge.
+    const closes = Int32Array.from(evalCloses).sort();
+    const C = closes.length;
 
-    const out = [];
+    // Joined in chunks so the pieces of a hit-dense input do not all stay alive at once.
+    const chunks = [];
+    let out = [];
     let last = 0;
-    for (const e of edits) {
-      out.push(src.slice(last, e.pos), e.text);
-      last = e.end;
+    for (let i = 0, j = 0; i < E || j < C;) {
+      let pos, end, text;
+      if (j < C && (i === E || closes[j] < epos[i])) { pos = end = closes[j++]; text = ')'; }
+      else { pos = epos[i]; end = eend[i]; text = etext[i]; i++; }
+      out.push(src.slice(last, pos), text);
+      last = end;
+      if (out.length >= 8192) { chunks.push(out.join('')); out = []; }
     }
     out.push(src.slice(last));
     // An exported declaration was renamed: keep exporting it under its original name too.
     if (exportAlias) out.push('\n;export{' + REPLACEMENT + ' as ' + NAME + '};');
-    return out.join('');
+    chunks.push(out.join(''));
+    return chunks.length === 1 ? chunks[0] : chunks.join('');
   }
 
   /**
