@@ -9,7 +9,13 @@
     "node": ">=18"
   },
   "scripts": {
-    "start": "node server.js",
-    "test": "node --test test/*.test.js"
+    "start": "node --max-http-header-size=65536 server.js",
+    "start:varnish": "bash scripts/start.sh",
+    "start:node": "bash scripts/start-node-only.sh",
+    "stop": "bash scripts/stop.sh",
+    "test": "node --test test/*.test.js",
+    "test:varnish": "node --test test/varnish.test.js",
+    "test:e2e": "node --test test/e2e/*.test.js",
+    "test:all": "npm test && npm run test:e2e"
   }
 }

@@ -3,146 +3,520 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<meta name="referrer" content="no-referrer">
+<meta name="description" content="userx70 host server: a self-hosted proxy. Open any site through this server.">
 <title>userx70 host server</title>
 <link rel="icon" href="/favicon.ico" type="image/svg+xml">
+<script>
+  // Apply the saved theme before the first paint.
+  try {
+    var t = (JSON.parse(localStorage.getItem('proxy:settings')) || {}).theme;
+    if (t === 'light' || t === 'dark') document.documentElement.setAttribute('data-theme', t);
+  } catch (e) {}
+</script>
 <style>
   :root {
     --bg: #f6f7fb; --card: #ffffff; --text: #16181d; --muted: #5d6474; --border: #dde1ea;
     --accent: #3b5bdb; --accent-text: #ffffff; --chip: #eef1f8; --danger: #c92a2a;
+    --shadow: 0 12px 40px rgba(22, 24, 29, .18); --scrim: rgba(15, 17, 21, .45);
+    color-scheme: light;
   }
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
       --bg: #0f1115; --card: #171a21; --text: #e8eaf0; --muted: #9aa3b5; --border: #2a2f3a;
       --accent: #748ffc; --accent-text: #0f1115; --chip: #20242d; --danger: #ff8787;
+      --shadow: 0 12px 40px rgba(0, 0, 0, .5); --scrim: rgba(0, 0, 0, .6);
+      color-scheme: dark;
     }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1115; --card: #171a21; --text: #e8eaf0; --muted: #9aa3b5; --border: #2a2f3a;
+    --accent: #748ffc; --accent-text: #0f1115; --chip: #20242d; --danger: #ff8787;
+    --shadow: 0 12px 40px rgba(0, 0, 0, .5); --scrim: rgba(0, 0, 0, .6);
+    color-scheme: dark;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; min-height: 100%; }
   body {
     background: var(--bg); color: var(--text);
     font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif;
-    display: flex; flex-direction: column; align-items: center; padding: 12vh 16px 48px;
+    display: flex; flex-direction: column; align-items: center; padding: 10vh 16px 48px;
+    overflow-x: hidden;
   }
   main { width: 100%; max-width: 680px; }
-  h1 { font-size: 28px; font-weight: 650; margin: 0 0 6px; letter-spacing: -0.01em; display: flex; align-items: center; gap: 10px; }
-  h1 svg { width: 30px; height: 30px; }
-  p.sub { margin: 0 0 24px; color: var(--muted); }
-  form { display: flex; gap: 8px; }
+  .skip { position: absolute; left: -9999px; top: 8px; }
+  .skip:focus { left: 16px; background: var(--card); color: var(--text); padding: 8px 12px; border-radius: 8px; z-index: 10; }
+  header { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; margin-bottom: 24px; }
+  h1 { font-size: 28px; font-weight: 650; margin: 0; letter-spacing: -0.01em; display: flex; align-items: center; gap: 10px; line-height: 1.2; overflow-wrap: anywhere; }
+  h1 svg { width: 30px; height: 30px; flex: none; color: var(--accent); }
+  p.sub { margin: 6px 0 0; color: var(--muted); }
+  form.go { display: flex; gap: 8px; }
   input[type=text] {
     flex: 1; min-width: 0; font: inherit; padding: 14px 16px; border-radius: 12px;
     border: 1px solid var(--border); background: var(--card); color: var(--text); outline: none;
   }
+  input[type=text]::placeholder { color: var(--muted); }
   input[type=text]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent); }
-  button {
-    font: inherit; font-weight: 600; padding: 0 20px; border-radius: 12px; border: 0;
-    background: var(--accent); color: var(--accent-text); cursor: pointer;
+  button { font: inherit; cursor: pointer; }
+  .primary {
+    font-weight: 600; padding: 0 22px; min-height: 48px; border-radius: 12px; border: 0;
+    background: var(--accent); color: var(--accent-text);
   }
-  button:focus-visible { outline: 3px solid color-mix(in srgb, var(--accent) 40%, transparent); }
-  section { margin-top: 32px; }
+  button:focus-visible, a:focus-visible, input:focus-visible {
+    outline: 3px solid color-mix(in srgb, var(--accent) 45%, transparent); outline-offset: 2px;
+  }
+  .icon-btn {
+    flex: none; width: 44px; height: 44px; display: grid; place-items: center; border-radius: 12px;
+    border: 1px solid var(--border); background: var(--card); color: var(--text); padding: 0;
+  }
+  .icon-btn:hover { border-color: var(--accent); }
+  .icon-btn svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+  #status { min-height: 22px; color: var(--muted); font-size: 14px; margin-top: 8px; }
+  section { margin-top: 28px; }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 10px; font-weight: 600; }
-  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
-  .chips a {
-    text-decoration: none; color: var(--text); background: var(--chip); border: 1px solid var(--border);
-    padding: 6px 12px; border-radius: 999px; font-size: 14px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; margin: 0; padding: 0; }
+  .chips li { display: flex; max-width: 100%; min-width: 0; }
+  .chip {
+    display: inline-flex; align-items: center; text-decoration: none; color: var(--text); background: var(--chip);
+    border: 1px solid var(--border); padding: 6px 12px; border-radius: 999px; font-size: 14px; max-width: 100%;
+    min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
-  .chips a:hover { border-color: var(--accent); }
-  .row { display: flex; justify-content: space-between; align-items: center; }
-  .link-btn { background: none; color: var(--muted); padding: 0; font-weight: 500; font-size: 13px; }
+  a.chip:hover { border-color: var(--accent); }
+  .recent .chip { border-top-right-radius: 0; border-bottom-right-radius: 0; border-right: 0; display: block; }
+  .recent .remove {
+    border: 1px solid var(--border); border-left: 0; background: var(--chip); color: var(--muted);
+    border-radius: 0 999px 999px 0; padding: 0 10px 0 6px; font-size: 16px; line-height: 1;
+  }
+  .recent .remove:hover { color: var(--danger); }
+  .row { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .link-btn { background: none; border: 0; color: var(--muted); padding: 4px 0; font-weight: 500; font-size: 13px; }
   .link-btn:hover { color: var(--danger); }
-  footer { margin-top: 40px; color: var(--muted); font-size: 13px; }
-  footer code { background: var(--chip); padding: 1px 6px; border-radius: 6px; }
   .empty { color: var(--muted); font-size: 14px; }
-  #status { min-height: 20px; color: var(--muted); font-size: 13px; margin-top: 8px; }
+  footer { margin-top: 40px; color: var(--muted); font-size: 13px; }
+  footer p { margin: 0 0 6px; }
+  code, kbd { background: var(--chip); padding: 1px 6px; border-radius: 6px; font-size: 12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; overflow-wrap: anywhere; }
+  kbd { border: 1px solid var(--border); }
+
+  /* Settings drawer */
+  dialog {
+    margin: 0 0 0 auto; height: 100%; max-height: 100%; width: min(380px, 100%); max-width: 100%;
+    border: 0; border-left: 1px solid var(--border); padding: 0; background: var(--card); color: var(--text);
+    box-shadow: var(--shadow);
+  }
+  dialog::backdrop { background: var(--scrim); }
+  dialog[open] { display: flex; flex-direction: column; }
+  .drawer-head { display: flex; align-items: center; justify-content: space-between; padding: 16px 16px 8px 20px; }
+  .drawer-head h2 { font-size: 18px; text-transform: none; letter-spacing: 0; color: var(--text); margin: 0; }
+  .drawer-body { padding: 0 20px 20px; overflow-y: auto; flex: 1; }
+  fieldset { border: 0; margin: 16px 0 0; padding: 0; min-width: 0; }
+  legend { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); font-weight: 600; margin-bottom: 8px; padding: 0; }
+  .option { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 10px; margin-bottom: 6px; cursor: pointer; }
+  .option:hover { border-color: var(--accent); }
+  .option:has(input:checked) { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 10%, transparent); }
+  .option input { margin: 0; accent-color: var(--accent); width: 18px; height: 18px; flex: none; }
+  .option small { display: block; color: var(--muted); font-size: 12px; }
+  .drawer-foot { padding: 12px 20px 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 13px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+  .drawer-foot .primary { min-height: 40px; }
+
+  @media (max-width: 480px) {
+    body { padding-top: 6vh; }
+    h1 { font-size: 24px; }
+    form.go { flex-wrap: wrap; }
+    form.go input[type=text] { flex-basis: 100%; }
+    form.go .primary { flex: 1; }
+  }
+  @media (prefers-reduced-motion: no-preference) {
+    dialog[open] { animation: slide-in .18s ease-out; }
+    @keyframes slide-in { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
+  }
 </style>
 </head>
 <body>
+<a class="skip" href="#url">Skip to the address box</a>
 <main>
-  <h1>
-    <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M3 16h26M16 3c4 4 5.5 8.5 5.5 13S20 25 16 29c-4-4-5.5-8.5-5.5-13S12 7 16 3z" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>
-    userx70 host server
-  </h1>
-  <p class="sub">Enter a web address or search terms.</p>
-  <form id="go" action="/__proxy/go" method="get" autocomplete="off">
-    <input id="url" name="url" type="text" placeholder="example.com or search…" autofocus spellcheck="false" autocapitalize="off" aria-label="Address or search">
-    <button type="submit">Go</button>
+  <header>
+    <div>
+      <h1>
+        <svg viewBox="0 0 32 32" aria-hidden="true"><circle cx="16" cy="16" r="13" fill="none" stroke="currentColor" stroke-width="2.5"/><path d="M3 16h26M16 3c4 4 5.5 8.5 5.5 13S20 25 16 29c-4-4-5.5-8.5-5.5-13S12 7 16 3z" fill="none" stroke="currentColor" stroke-width="2.5"/></svg>
+        userx70 host server
+      </h1>
+      <p class="sub">Enter a web address or search terms.</p>
+    </div>
+    <button class="icon-btn" id="open-settings" type="button" aria-haspopup="dialog" aria-controls="settings" aria-label="Settings" title="Settings">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/></svg>
+    </button>
+  </header>
+
+  <form class="go" id="go" action="/__proxy/go" method="get" autocomplete="off" role="search">
+    <input id="url" name="url" type="text" placeholder="example.com or search…" autofocus spellcheck="false"
+      autocapitalize="off" autocorrect="off" enterkeyhint="go" aria-label="Address or search terms" aria-describedby="status">
+    <button class="primary" type="submit">Go</button>
   </form>
-  <div id="status" role="status"></div>
+  <div id="status" role="status" aria-live="polite"></div>
 
-  <section>
-    <h2>Quick links</h2>
-    <div class="chips" id="quick"></div>
+  <section aria-labelledby="quick-title">
+    <h2 id="quick-title">Quick links</h2>
+    <ul class="chips" id="quick"></ul>
   </section>
 
-  <section>
-    <div class="row"><h2>Recent</h2><button class="link-btn" id="clear-history" type="button">Clear history</button></div>
-    <div class="chips" id="recent"></div>
+  <section aria-labelledby="recent-title" id="recent-section">
+    <div class="row"><h2 id="recent-title">Recent</h2><button class="link-btn" id="clear-history" type="button">Clear history</button></div>
+    <ul class="chips recent" id="recent"></ul>
   </section>
 
-  <section>
-    <div class="row"><h2>Session</h2></div>
+  <section aria-labelledby="session-title">
+    <h2 id="session-title">Session</h2>
     <button class="link-btn" id="clear-cookies" type="button">Sign out everywhere (clear proxied cookies)</button>
   </section>
 
-  <footer>Pages are fetched by this server and rewritten so every link, image, script and request stays inside the proxy. Direct links work too: <code>/p/https://example.com/</code></footer>
+  <footer>
+    <p>Pages are fetched by this server and rewritten so every link, image, script and request stays inside the proxy. Direct links work too: <code>/p/https://example.com/</code></p>
+    <p>Press <kbd>/</kbd> to jump to the address box. The floating button on proxied pages brings you back here.</p>
+  </footer>
 </main>
+
+<dialog id="settings" aria-labelledby="settings-title">
+  <form method="dialog" id="settings-form">
+    <div class="drawer-head">
+      <h2 id="settings-title">Settings</h2>
+      <button class="icon-btn" type="submit" value="close" aria-label="Close settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 6 6 18M6 6l12 12"/></svg>
+      </button>
+    </div>
+    <div class="drawer-body">
+      <fieldset id="engines">
+        <legend>Search engine</legend>
+      </fieldset>
+      <fieldset>
+        <legend>Browsing</legend>
+        <label class="option"><input type="checkbox" id="opt-newtab"><span>Open sites in a new tab<small>Keep this page open while you browse.</small></span></label>
+        <label class="option"><input type="checkbox" id="opt-history"><span>Remember recent sites<small>Stored only in this browser. Turning it off clears the list.</small></span></label>
+      </fieldset>
+      <fieldset id="themes">
+        <legend>Appearance</legend>
+      </fieldset>
+    </div>
+    <div class="drawer-foot">
+      <span>Saved in this browser.</span>
+      <button class="primary" type="submit" value="done">Done</button>
+    </div>
+  </form>
+</dialog>
+
 <script>
 (function () {
+  'use strict';
   var QUICK = [
     ['Wikipedia', 'https://en.wikipedia.org/'], ['DuckDuckGo', 'https://duckduckgo.com/'],
     ['Google', 'https://www.google.com/'], ['YouTube', 'https://www.youtube.com/'],
     ['Reddit', 'https://old.reddit.com/'], ['GitHub', 'https://github.com/'],
     ['Hacker News', 'https://news.ycombinator.com/'], ['BBC News', 'https://www.bbc.com/news'],
   ];
-  var KEY = 'proxy:history';
-  function load() { try { return JSON.parse(localStorage.getItem(KEY)) || []; } catch (e) { return []; } }
-  function save(h) { try { localStorage.setItem(KEY, JSON.stringify(h.slice(0, 20))); } catch (e) {} }
+  // %s is replaced by the query. Without JavaScript the server searches with its SEARCH_URL.
+  var ENGINES = [
+    ['duckduckgo', 'DuckDuckGo', 'https://duckduckgo.com/?q=%s'],
+    ['google', 'Google', 'https://www.google.com/search?q=%s'],
+    ['bing', 'Bing', 'https://www.bing.com/search?q=%s'],
+    ['brave', 'Brave Search', 'https://search.brave.com/search?q=%s'],
+    ['startpage', 'Startpage', 'https://www.startpage.com/do/search?q=%s'],
+  ];
+  var THEMES = [['system', 'Match the system'], ['light', 'Light'], ['dark', 'Dark']];
+  var HISTORY_KEY = 'proxy:history';
+  var SETTINGS_KEY = 'proxy:settings';
+  var DEFAULTS = { engine: 'duckduckgo', newTab: false, history: true, theme: 'system' };
+  var MAX_HISTORY = 20;
+
+  function $(id) { return document.getElementById(id); }
+  function read(key, fallback) {
+    try { var v = JSON.parse(localStorage.getItem(key)); return v == null ? fallback : v; } catch (e) { return fallback; }
+  }
+  function write(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) {}
+  }
+
+  var settings = (function () {
+    var s = read(SETTINGS_KEY, {});
+    var out = {};
+    for (var k in DEFAULTS) out[k] = s && typeof s[k] === typeof DEFAULTS[k] ? s[k] : DEFAULTS[k];
+    if (!ENGINES.some(function (e) { return e[0] === out.engine; })) out.engine = DEFAULTS.engine;
+    return out;
+  })();
+  function saveSettings() { write(SETTINGS_KEY, settings); }
+
+  function status(text) { $('status').textContent = text; }
+  function engine() {
+    for (var i = 0; i < ENGINES.length; i++) if (ENGINES[i][0] === settings.engine) return ENGINES[i];
+    return ENGINES[0];
+  }
+
+  // ---- what the user typed -> a real URL ------------------------------------------------------
+
+  function decodeProxied(s) {
+    // A proxy link pasted back in: /p/https://site/... or http://this-server/p/https://site/...
+    var self = location.origin + '/p/';
+    if (s.indexOf(self) === 0) s = s.slice(location.origin.length);
+    if (s.indexOf('/p/') !== 0) return null;
+    var rest = s.slice(3);
+    // Some clients collapse "//" after the scheme.
+    rest = rest.replace(/^(https?|wss?):\/(?!\/)/i, '$1://');
+    return /^(https?|wss?):\/\//i.test(rest) ? rest : null;
+  }
+
+  function normalise(input) {
+    var s = String(input || '').trim();
+    if (!s) return null;
+    var proxied = decodeProxied(s);
+    if (proxied) return proxied;
+    if (/^(https?|wss?):\/\//i.test(s)) {
+      try { return new URL(s).href; } catch (e) { /* not a URL: search for it */ }
+    }
+    if (!/\s/.test(s)) {
+      // Bare IPv4 addresses and localhost are usually plain-HTTP lab servers.
+      if (/^(localhost|\d{1,3}(\.\d{1,3}){3}|\[[0-9a-f:.]+\])(:\d+)?([/?#]|$)/i.test(s)) {
+        try { return new URL('http://' + s).href; } catch (e) {}
+      }
+      if (/^[^\s/?#:@]+\.[a-z][a-z0-9-]*\.?(:\d+)?([/?#]|$)/i.test(s) || /^[^\s/?#:@]+\.xn--[a-z0-9-]+(:\d+)?([/?#]|$)/i.test(s)) {
+        try { return new URL('https://' + s).href; } catch (e) {}
+      }
+    }
+    return engine()[2].replace('%s', encodeURIComponent(s));
+  }
+
+  // ---- history ---------------------------------------------------------------------------------
+
+  function loadHistory() {
+    var h = read(HISTORY_KEY, []);
+    return Array.isArray(h) ? h.filter(function (u) { return typeof u === 'string'; }) : [];
+  }
+  function remember(url) {
+    if (!settings.history) return;
+    var h = loadHistory().filter(function (x) { return x !== url; });
+    h.unshift(url);
+    write(HISTORY_KEY, h.slice(0, MAX_HISTORY));
+    renderRecent();
+  }
+  function forget(url) {
+    write(HISTORY_KEY, loadHistory().filter(function (x) { return x !== url; }));
+    renderRecent();
+  }
+
+  function labelFor(u) {
+    try {
+      var x = new URL(u);
+      var q = x.searchParams.get('q');
+      if (q && /(duckduckgo|google|bing|brave|startpage)\./.test(x.hostname)) return '“' + q + '”';
+      return x.hostname.replace(/^www\./, '') + (x.pathname.length > 1 ? x.pathname : '');
+    } catch (e) { return u; }
+  }
+
   function chip(label, url) {
     var a = document.createElement('a');
-    a.href = '/p/' + url; a.textContent = label; a.title = url;
+    a.className = 'chip';
+    a.href = '/p/' + url;
+    a.textContent = label;
+    a.title = url;
+    a.setAttribute('data-url', url);
+    if (settings.newTab) { a.target = '_blank'; a.rel = 'noopener'; }
     return a;
   }
-  var quick = document.getElementById('quick');
-  QUICK.forEach(function (q) { quick.appendChild(chip(q[0], q[1])); });
 
-  function renderRecent() {
-    var el = document.getElementById('recent');
+  function renderQuick() {
+    var el = $('quick');
     el.textContent = '';
-    var h = load();
-    if (!h.length) { var s = document.createElement('span'); s.className = 'empty'; s.textContent = 'Nothing yet.'; el.appendChild(s); return; }
-    h.forEach(function (u) {
-      var label = u;
-      try { var x = new URL(u); label = x.hostname.replace(/^www\./, '') + (x.pathname.length > 1 ? x.pathname : ''); } catch (e) {}
-      el.appendChild(chip(label, u));
+    QUICK.forEach(function (q) {
+      var li = document.createElement('li');
+      li.appendChild(chip(q[0], q[1]));
+      el.appendChild(li);
     });
   }
-  renderRecent();
 
-  function normalise(s) {
-    s = s.trim();
-    if (!s) return null;
-    if (/^https?:\/\//i.test(s)) return s;
-    if (!/\s/.test(s) && (/^[^\s\/?#]+\.[^\s\/?#]{2,}([\/?#]\S*)?$/.test(s) || /^localhost(:\d+)?/i.test(s))) return 'https://' + s;
-    return null; // let the server turn it into a search
+  function renderRecent() {
+    $('recent-section').hidden = !settings.history;
+    var el = $('recent');
+    el.textContent = '';
+    var h = loadHistory();
+    $('clear-history').hidden = !h.length;
+    if (!h.length) {
+      var li = document.createElement('li');
+      li.className = 'empty';
+      li.textContent = 'Nothing yet.';
+      el.appendChild(li);
+      return;
+    }
+    h.forEach(function (u) {
+      var li = document.createElement('li');
+      var label = labelFor(u);
+      li.appendChild(chip(label, u));
+      var x = document.createElement('button');
+      x.type = 'button';
+      x.className = 'remove';
+      x.textContent = '×';
+      x.setAttribute('aria-label', 'Remove ' + label + ' from recent sites');
+      x.addEventListener('click', function () {
+        var index = Array.prototype.indexOf.call(el.children, li);
+        forget(u);
+        status('Removed ' + label + ' from recent sites.');
+        // Keep keyboard focus in the list.
+        var buttons = el.querySelectorAll('.remove');
+        (buttons[Math.min(index, buttons.length - 1)] || $('url')).focus();
+      });
+      li.appendChild(x);
+      el.appendChild(li);
+    });
   }
 
-  document.getElementById('go').addEventListener('submit', function (e) {
-    var v = document.getElementById('url').value;
-    var u = normalise(v);
-    if (!u) return; // server-side search fallback
+  function open(url) {
+    var href = '/p/' + url;
+    remember(url);
+    if (settings.newTab) {
+      var w = window.open(href, '_blank');
+      if (w) {
+        // The site must not be able to script this page through window.opener.
+        try { w.opener = null; } catch (e) {}
+        status('Opened ' + labelFor(url) + ' in a new tab.');
+        return;
+      }
+      // Blocked as a popup: open it here instead.
+    }
+    location.href = href;
+  }
+
+  // ---- settings drawer -----------------------------------------------------------------------
+
+  function radio(name, value, label, checked, onChange, note) {
+    var l = document.createElement('label');
+    l.className = 'option';
+    var i = document.createElement('input');
+    i.type = 'radio';
+    i.name = name;
+    i.value = value;
+    i.checked = checked;
+    i.addEventListener('change', function () { if (i.checked) onChange(value); });
+    var span = document.createElement('span');
+    span.textContent = label;
+    if (note) {
+      var small = document.createElement('small');
+      small.textContent = note;
+      span.appendChild(small);
+    }
+    l.appendChild(i);
+    l.appendChild(span);
+    return l;
+  }
+
+  function applyTheme() {
+    if (settings.theme === 'light' || settings.theme === 'dark') document.documentElement.setAttribute('data-theme', settings.theme);
+    else document.documentElement.removeAttribute('data-theme');
+  }
+
+  function buildSettings() {
+    var engines = $('engines');
+    ENGINES.forEach(function (e) {
+      engines.appendChild(radio('engine', e[0], e[1], settings.engine === e[0], function (v) {
+        settings.engine = v;
+        saveSettings();
+      }, e[0] === 'duckduckgo' ? 'Default' : null));
+    });
+    var themes = $('themes');
+    THEMES.forEach(function (t) {
+      themes.appendChild(radio('theme', t[0], t[1], settings.theme === t[0], function (v) {
+        settings.theme = v;
+        saveSettings();
+        applyTheme();
+      }));
+    });
+    var newTab = $('opt-newtab');
+    newTab.checked = settings.newTab;
+    newTab.addEventListener('change', function () {
+      settings.newTab = newTab.checked;
+      saveSettings();
+      renderQuick();
+      renderRecent();
+    });
+    var hist = $('opt-history');
+    hist.checked = settings.history;
+    hist.addEventListener('change', function () {
+      settings.history = hist.checked;
+      if (!hist.checked) write(HISTORY_KEY, []);
+      saveSettings();
+      renderRecent();
+    });
+  }
+
+  var dialog = $('settings');
+  var opener = $('open-settings');
+  opener.addEventListener('click', function () {
+    if (typeof dialog.showModal === 'function') dialog.showModal();
+    else dialog.setAttribute('open', '');
+    var checked = dialog.querySelector('input[name=engine]:checked');
+    if (checked) checked.focus();
+  });
+  dialog.addEventListener('close', function () { opener.focus(); });
+  // A click on the backdrop (outside the drawer) closes it.
+  dialog.addEventListener('click', function (e) {
+    if (e.target !== dialog) return;
+    var r = dialog.getBoundingClientRect();
+    if (e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom) dialog.close();
+  });
+  if (typeof dialog.showModal !== 'function') {
+    // Very old browsers: method="dialog" does nothing there.
+    $('settings-form').addEventListener('submit', function (e) { e.preventDefault(); dialog.removeAttribute('open'); opener.focus(); });
+  }
+
+  // ---- wiring ----------------------------------------------------------------------------------
+
+  $('go').addEventListener('submit', function (e) {
     e.preventDefault();
-    var h = load().filter(function (x) { return x !== u; });
-    h.unshift(u); save(h);
-    location.href = '/p/' + u;
+    var u = normalise($('url').value);
+    if (!u) {
+      status('Type a web address or something to search for.');
+      $('url').focus();
+      return;
+    }
+    status('Opening ' + labelFor(u) + '…');
+    open(u);
   });
-  document.getElementById('clear-history').addEventListener('click', function () { save([]); renderRecent(); });
-  document.getElementById('clear-cookies').addEventListener('click', function () {
-    var st = document.getElementById('status');
-    fetch('/__proxy/clear', { method: 'POST' }).then(function (r) {
-      st.textContent = r.ok ? 'All proxied cookies cleared.' : 'Could not clear cookies.';
-    }, function () { st.textContent = 'Could not clear cookies.'; });
+
+  // Links on this page: remember them (middle-click and new tabs included).
+  document.addEventListener('click', function (e) {
+    var a = e.target.closest && e.target.closest('a.chip');
+    if (a && a.getAttribute('data-url')) remember(a.getAttribute('data-url'));
   });
+  document.addEventListener('auxclick', function (e) {
+    var a = e.button === 1 && e.target.closest && e.target.closest('a.chip');
+    if (a && a.getAttribute('data-url')) remember(a.getAttribute('data-url'));
+  });
+
+  $('clear-history').addEventListener('click', function () {
+    write(HISTORY_KEY, []);
+    renderRecent();
+    status('History cleared.');
+    $('url').focus();
+  });
+
+  $('clear-cookies').addEventListener('click', function () {
+    if (!window.confirm('Sign out of every site opened through this proxy? This deletes all of their cookies.')) return;
+    fetch('/__proxy/clear', { method: 'POST', credentials: 'same-origin' }).then(function (r) {
+      status(r.ok ? 'Signed out everywhere: all proxied cookies were cleared.' : 'Could not clear cookies (' + r.status + ').');
+    }, function () { status('Could not clear cookies: the server did not answer.'); });
+  });
+
+  // "/" jumps to the address box, as on many sites.
+  document.addEventListener('keydown', function (e) {
+    if (e.key !== '/' || e.ctrlKey || e.metaKey || e.altKey || dialog.open) return;
+    var t = e.target;
+    if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+    e.preventDefault();
+    $('url').focus();
+    $('url').select();
+  });
+
+  buildSettings();
+  renderQuick();
+  renderRecent();
   var params = new URLSearchParams(location.search);
-  if (params.get('url')) document.getElementById('url').value = params.get('url');
+  if (params.get('url')) $('url').value = params.get('url');
 })();
 </script>
 </body>

@@ -42,6 +42,22 @@ const BREAKOUT = new Set([
   'ruby', 's', 'small', 'span', 'strong', 'strike', 'sub', 'sup', 'table', 'tt', 'u', 'ul', 'var',
 ]);
 
+// Start tags that never open an element where we track them: <html>, <head>, <body> and
+// <frameset> merge into or are ignored by an open document, and </body>, </html> do not close.
+const NOT_OPENED = new Set(['html', 'head', 'body', 'frameset']);
+const TABLE_PARTS = new Set(['caption', 'col', 'colgroup', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr']);
+// SVG element names with uppercase letters (lowercased here).
+const SVG_CAMEL = new Set(`
+altglyph altglyphdef altglyphitem animatecolor animatemotion animatetransform clippath feblend fecolormatrix
+fecomponenttransfer fecomposite feconvolvematrix fediffuselighting fedisplacementmap fedistantlight fedropshadow
+feflood fefunca fefuncb fefuncg fefuncr fegaussianblur feimage femerge femergenode femorphology feoffset
+fepointlight fespecularlighting fespotlight fetile feturbulence foreignobject glyphref lineargradient
+radialgradient textpath
+`.trim().split(/\s+/));
+
+// HTML elements that bound the search for an element "in scope" when an end tag is matched.
+const SCOPE = new Set(['applet', 'caption', 'html', 'table', 'td', 'th', 'marquee', 'object', 'template']);
+
 // Attributes holding one URL that is fetched or navigated to.
 const URL_ATTRS = new Set([
   'src', 'href', 'xlink:href', 'action', 'formaction', 'poster', 'background', 'longdesc', 'lowsrc', 'dynsrc',
@@ -557,6 +573,9 @@ function run(html, pageUrl, o, linkBase) {
   let lazyBeforeBase = false;
   // Open SVG / MathML elements, and HTML elements inside their HTML integration points.
   const stack = [];
+  // Approximate stack of open HTML elements outside foreign content (no implied end tags): only
+  // used to tell whether an end tag inside <svg>/<math> closes one of their HTML ancestors.
+  const open = [];
 
   const inject = (at) => {
     if (!injected) {
@@ -662,16 +681,23 @@ function run(html, pageUrl, o, linkBase) {
         while (inForeign()) stack.pop();
       }
       if (inForeign()) ns = top().ns === 'math' && top().name === 'annotation-xml' && name === 'svg' ? 'svg' : top().ns;
+      // In a MathML text integration point (<mi>...), <mglyph> and <malignmark> stay MathML.
+      else if ((name === 'mglyph' || name === 'malignmark') && stack.length && top().text) ns = 'math';
       else ns = name === 'svg' ? 'svg' : name === 'math' ? 'math' : 'html';
       if (!selfClosing || ns === 'html') {
         if (ns !== 'html') {
-          const ip = ns === 'svg'
+          const text = ns === 'math' && (name === 'mi' || name === 'mo' || name === 'mn' || name === 'ms' || name === 'mtext');
+          const ip = text || (ns === 'svg'
             ? name === 'foreignobject' || name === 'desc' || name === 'title'
-            : name === 'mi' || name === 'mo' || name === 'mn' || name === 'ms' || name === 'mtext' ||
-              (name === 'annotation-xml' && /^(text\/html|application\/xhtml\+xml)$/i.test((attrValue(attrs, 'encoding') || '').trim()));
-          if (stack.length < MAX_STACK) stack.push({ name, ns, ip });
-        } else if (stack.length && !VOID.has(name) && !RAW_TEXT[name] && stack.length < MAX_STACK) {
-          stack.push({ name, ns, ip: false });
+            : name === 'annotation-xml' && /^(text\/html|application\/xhtml\+xml)$/i.test(attrValue(attrs, 'encoding') || ''));
+          if (stack.length < MAX_STACK) stack.push({ name, ns, ip, text });
+        } else if (!VOID.has(name) && !RAW_TEXT[name] && !NOT_OPENED.has(name)) {
+          if (stack.length) {
+            // Inside an integration point the tree builder is "in body", where table parts are ignored.
+            if (!TABLE_PARTS.has(name) && stack.length < MAX_STACK) stack.push({ name, ns, ip: false });
+          } else if (open.length < MAX_STACK) {
+            open.push(name);
+          }
         }
       }
     }
@@ -763,19 +789,62 @@ function run(html, pageUrl, o, linkBase) {
     const name = html.slice(lt + 2, j).toLowerCase();
     const t = parseAttrs(html, j);
     inject(lt);
-    if (stack.length && !o.xml) {
-      if ((name === 'p' || name === 'br') && inForeign()) {
-        while (inForeign()) stack.pop();
-      } else {
-        for (let k = stack.length - 1; k >= 0; k--) {
-          if (stack[k].name === name) {
-            stack.length = k;
-            break;
-          }
-        }
-      }
+    if (o.xml) return t.end;
+    if (stack.length) {
+      closeForeign(name);
+    } else {
+      const k = openIndex(name);
+      if (k !== -1) open.length = k;
     }
     return t.end;
+  }
+
+  // Innermost open HTML ancestor (outside foreign content) with this name, within scope.
+  function openIndex(name) {
+    for (let k = open.length - 1; k >= 0; k--) {
+      if (open[k] === name) return k;
+      if (SCOPE.has(open[k])) break;
+    }
+    return -1;
+  }
+
+  // An end tag inside foreign content, following the tree builder: foreign elements match by
+  // name from the current node down; otherwise the HTML rules look for an open HTML element and
+  // stop at integration points and scope boundaries, so a stray </div> inside <svg><title> does
+  // nothing while one that closes the <div> around an unclosed <svg> ends the SVG.
+  function closeForeign(name) {
+    if ((name === 'p' || name === 'br') && inForeign()) {
+      while (inForeign()) stack.pop();
+      return;
+    }
+    if (top().ns !== 'html') {
+      for (let k = stack.length - 1; k >= 0 && stack[k].ns !== 'html'; k--) {
+        if (stack[k].name === name) {
+          stack.length = k;
+          return;
+        }
+      }
+      // Chromium case-adjusts end tags under an SVG node (</foreignObject>), so they never match
+      // an HTML element.
+      if (top().ns === 'svg' && SVG_CAMEL.has(name)) return;
+    }
+    for (let k = stack.length - 1; k >= 0; k--) {
+      const e = stack[k];
+      if (e.ns === 'html') {
+        if (e.name === name) {
+          stack.length = k;
+          return;
+        }
+        if (SCOPE.has(e.name)) return;
+      } else if (e.ip) {
+        return;
+      }
+    }
+    const k = openIndex(name);
+    if (k !== -1) {
+      open.length = k;
+      stack.length = 0;
+    }
   }
 
   function markupDeclaration(lt) {
@@ -790,7 +859,8 @@ function run(html, pageUrl, o, linkBase) {
       return end;
     }
     if (nameAt(html, lt + 2, 'doctype')) return doctypeEnd(html, lt);
-    if (html.startsWith('<![CDATA[', lt) && (o.xml || (stack.length && top().ns !== 'html'))) {
+    // Browsers honour CDATA only in foreign content proper, not at integration points (<svg><title>).
+    if (html.startsWith('<![CDATA[', lt) && (o.xml || inForeign())) {
       const e = html.indexOf(']]>', lt + 9);
       return e === -1 ? n : e + 3;
     }

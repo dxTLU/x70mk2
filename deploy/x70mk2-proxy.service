@@ -1,0 +1,60 @@
+# systemd unit for the proxy app (Node.js), listening on 127.0.0.1:8080 behind Varnish.
+#
+# Install (deploy/install.sh does all of this):
+#   sudo cp -r . /opt/x70mk2
+#   sudo cp deploy/x70mk2-proxy.service /etc/systemd/system/
+#   sudo cp deploy/x70mk2-proxy.env /etc/default/x70mk2-proxy    # settings, edit as needed
+#   sudo systemctl daemon-reload && sudo systemctl enable --now x70mk2-proxy
+#
+# Without Varnish, set HOST=0.0.0.0 in /etc/default/x70mk2-proxy to serve port 8080 directly.
+
+[Unit]
+Description=x70mk2 rewriting web proxy (Node.js app)
+Documentation=file:///opt/x70mk2/README.md
+Wants=network-online.target
+After=network-online.target
+Before=varnish.service
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/x70mk2
+Environment=NODE_ENV=production
+Environment=HOST=127.0.0.1
+Environment=PORT=8080
+Environment=DATA_FILE=/var/lib/x70mk2-proxy/sessions.json
+EnvironmentFile=-/etc/default/x70mk2-proxy
+# Proxied URLs embed whole target URLs, hence the larger header limit.
+ExecStart=/usr/bin/env node --max-http-header-size=65536 server.js
+Restart=on-failure
+RestartSec=2s
+# server.js saves the cookie jars and lets open streams finish on SIGTERM.
+KillSignal=SIGTERM
+TimeoutStopSec=15s
+LimitNOFILE=65536
+
+# Sandboxing: a throwaway system user that can write only its state directory.
+DynamicUser=yes
+StateDirectory=x70mk2-proxy
+StateDirectoryMode=0700
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -134,7 +134,7 @@ after(() => {
 test('home page is served', async () => {
   const r = await request('/');
   assert.strictEqual(r.status, 200);
-  assert.match(r.body, /Web Proxy/);
+  assert.match(r.body, /userx70 host server/);
 });
 
 test('HTML is rewritten', async () => {
