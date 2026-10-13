@@ -323,7 +323,7 @@ test('WebSockets are tunnelled', async () => {
       if (buf.includes('echo:ping')) { s.destroy(); resolve(buf); }
     });
     s.on('error', reject);
-    setTimeout(() => reject(new Error('timeout: ' + buf)), 3000);
+    setTimeout(() => reject(new Error('timeout: ' + buf)), 3000).unref();
   });
   assert.match(got, /^HTTP\/1\.1 101/);
   assert.match(got, /sec-websocket-accept/i);

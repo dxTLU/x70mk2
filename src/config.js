@@ -39,9 +39,16 @@ module.exports = {
   tlsKey: env.TLS_KEY || '',
   // Trust X-Forwarded-Proto/Host from a fronting cache such as Varnish.
   trustProxy: bool(env.TRUST_PROXY, true),
+  // Browser isolation emulation. Every proxied site shares the proxy's single origin, so the
+  // server re-applies the rules the browser can no longer apply itself: SameSite cookie
+  // restrictions and CORS (preflights and response checks) for cross-origin fetch/XHR.
+  emulateSameSite: bool(env.EMULATE_SAMESITE, true),
+  emulateCors: bool(env.EMULATE_CORS, true),
   // Show the floating navigation widget on proxied pages.
   toolbar: bool(env.TOOLBAR, true),
   // Optional HTTP Basic auth to keep the proxy private: "user:password".
   basicAuth: env.BASIC_AUTH || '',
   logRequests: bool(env.LOG_REQUESTS, false),
+  // On SIGTERM/SIGINT: how long open streams, uploads and WebSockets may finish before exit.
+  shutdownGraceMs: int(env.SHUTDOWN_GRACE_MS, 3000),
 };

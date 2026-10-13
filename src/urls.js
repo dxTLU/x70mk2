@@ -2,7 +2,8 @@
 
 const PREFIX = '/p/';
 const SKIP_SCHEME = /^(?:data|blob|javascript|about|mailto|tel|sms|chrome|chrome-extension|moz-extension|intent|vbscript|filesystem|urn|magnet):/i;
-const PROXIED_PATH = /^\/p\/(?:https?|wss?):\/\/?/i;
+// Also accepts a percent-encoded scheme separator ("https%3A%2F%2F") from over-eager encoders.
+const PROXIED_PATH = /^\/p\/(?:https?|wss?)(?::\/\/?|%3a)/i;
 
 /** Convert the part of a request path after /p/ back into the real target URL. */
 function decodeTarget(pathAndQuery) {
