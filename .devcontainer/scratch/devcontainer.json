@@ -1,0 +1,21 @@
+{
+  "name": "x70 Scratch pipeline",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:22",
+  "features": {
+    "ghcr.io/itsmechlark/features/redis-server:1": {}
+  },
+  "forwardPorts": [7070],
+  "portsAttributes": {
+    "7070": {
+      "label": "x70 Scratch bridge",
+      "onAutoForward": "notify"
+    }
+  },
+  "onCreateCommand": "bash -lc 'cd scratch && npm install --no-audit --no-fund'",
+  "postStartCommand": "bash -lc 'scratch/scripts/codespace-start.sh'",
+  "customizations": {
+    "vscode": {
+      "extensions": ["dbaeumer.vscode-eslint"]
+    }
+  }
+}
