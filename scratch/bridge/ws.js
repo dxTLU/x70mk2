@@ -39,6 +39,7 @@ class WebSocketConnection extends EventEmitter {
     this.fragmentBytes = 0;
     this.fragmentOp = 0;
     this.closed = false;
+    this.isAlive = true;
     socket.setNoDelay(true);
     socket.on('data', (d) => this._onData(d));
     socket.on('close', () => this._finish(1006, ''));
@@ -52,6 +53,13 @@ class WebSocketConnection extends EventEmitter {
     const binary = Buffer.isBuffer(data) || data instanceof Uint8Array;
     this.socket.write(frame(binary ? OP.BIN : OP.TEXT, binary ? Buffer.from(data) : Buffer.from(String(data), 'utf8')));
     return true;
+  }
+
+  /** Send a ping and mark the connection unproven until its pong arrives (see the heartbeat). */
+  ping() {
+    if (!this.open) return;
+    this.isAlive = false;
+    this.socket.write(frame(OP.PING, Buffer.alloc(0)));
   }
 
   close(code = 1000, reason = '') {
@@ -113,6 +121,7 @@ class WebSocketConnection extends EventEmitter {
         if (this.open) this.socket.write(frame(OP.PONG, payload));
         return;
       case OP.PONG:
+        this.isAlive = true;
         return;
       case OP.CLOSE: {
         const code = payload.length >= 2 ? payload.readUInt16BE(0) : 1005;

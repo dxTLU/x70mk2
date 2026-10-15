@@ -5,10 +5,67 @@ const assert = require('node:assert');
 const path = require('path');
 const os = require('os');
 const fs = require('fs');
+const { EventEmitter } = require('events');
 const { resolveIn, BridgeError } = require('../bridge/sandbox');
+const { WebSocketConnection } = require('../bridge/ws');
 const { MemoryStore } = require('../bridge/redis');
 const { Sql } = require('../bridge/sql');
 const { twStringify, storedOptions, commentText, stamp, MARKER } = require('../tools/twconfig');
+
+function fakeSocket() {
+  const s = new EventEmitter();
+  s.writable = true;
+  s.written = [];
+  s.setNoDelay = () => {};
+  s.write = (buf) => { s.written.push(Buffer.from(buf)); return true; };
+  // A real TCP socket does not emit 'close' synchronously inside end(); only destroy tears down.
+  s.end = (buf) => { if (buf) s.written.push(Buffer.from(buf)); s.writable = false; };
+  s.destroy = () => { s.writable = false; s.emit('close'); };
+  return s;
+}
+
+// A client->server frame: masked, FIN set, payload < 126 bytes.
+function clientFrame(op, payload) {
+  payload = Buffer.from(payload);
+  const mask = Buffer.from([1, 2, 3, 4]);
+  const masked = Buffer.from(payload);
+  for (let i = 0; i < masked.length; i++) masked[i] ^= mask[i & 3];
+  return Buffer.concat([Buffer.from([0x80 | op, 0x80 | payload.length]), mask, masked]);
+}
+
+test('WebSocket codec: masked text in, unmasked text out', () => {
+  const s = fakeSocket();
+  const conn = new WebSocketConnection(s);
+  const got = [];
+  conn.on('message', (t) => got.push(t));
+  conn._onData(clientFrame(0x1, Buffer.from('hello', 'utf8')));
+  assert.deepEqual(got, ['hello']);
+  conn.send('hi');
+  const out = s.written.at(-1);
+  assert.equal(out[0], 0x81);          // FIN + text
+  assert.equal(out[1] & 0x80, 0);      // server frames are not masked
+  assert.equal(out.subarray(2).toString('utf8'), 'hi');
+});
+
+test('WebSocket heartbeat: ping marks not-alive until a pong arrives', () => {
+  const s = fakeSocket();
+  const conn = new WebSocketConnection(s);
+  assert.equal(conn.isAlive, true);
+  conn.ping();
+  assert.equal(conn.isAlive, false);
+  assert.equal(s.written.at(-1)[0], 0x89); // FIN + ping
+  conn._onData(clientFrame(0xa, Buffer.alloc(0))); // client pong
+  assert.equal(conn.isAlive, true);
+});
+
+test('WebSocket codec rejects an unmasked client frame', () => {
+  const s = fakeSocket();
+  const conn = new WebSocketConnection(s);
+  let closedCode = null;
+  conn.on('close', (code) => { closedCode = code; });
+  conn._onData(Buffer.from([0x81, 0x02, 0x68, 0x69])); // unmasked "hi"
+  assert.equal(closedCode, 1002);
+});
 
 test('resolveIn keeps paths inside the root and rejects escapes', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'x70s-'));

@@ -127,6 +127,11 @@ test('insertMany rejects a bad identifier', () => withBridge(async ({ call }) =>
   assert.equal(r.body.error.code, 'ESQL');
 }));
 
+test('an over-sized request body is refused with 413', () => withBridge(async ({ call }) => {
+  const r = await call('kv.set', { key: 'x', value: 'y'.repeat(2 * 1024 * 1024) }); // > maxFileBytes*1.4
+  assert.equal(r.status, 413);
+}));
+
 test('system metrics report numbers', () => withBridge(async ({ call }) => {
   const m = (await call('sys.metrics')).body.result;
   assert.equal(typeof m.cpuPercent, 'number');

@@ -109,12 +109,21 @@ async function start(config = load(), { log = console.log } = {}) {
   };
 
   const readBody = (req, limit) => new Promise((resolve, reject) => {
-    const parts = []; let n = 0;
+    const parts = []; let n = 0; let over = false;
+    const tooBig = () => reject(new BridgeError('ETOOBIG', 'Request body too large'));
     req.on('data', (d) => {
       n += d.length;
-      if (n > limit) { reject(new BridgeError('ETOOBIG', 'Request body too large')); req.destroy(); } else parts.push(d);
+      if (n > limit) {
+        over = true;
+        // Stop buffering, but drain the rest so the handler can still send a clean 413 response.
+        // Only a pathologically huge body (an attack, not a big save) is force-closed.
+        if (n > limit * 4 + 65536) { tooBig(); req.destroy(); }
+      } else {
+        parts.push(d);
+      }
     });
-    req.on('end', () => resolve(Buffer.concat(parts).toString('utf8')));
+    req.on('end', () => (over ? tooBig() : resolve(Buffer.concat(parts).toString('utf8'))));
+    req.on('aborted', tooBig);
     req.on('error', reject);
   });
 
@@ -166,7 +175,8 @@ async function start(config = load(), { log = console.log } = {}) {
       }
       return send(res, 404, 'Not found', cors);
     } catch (e) {
-      return send(res, e instanceof SyntaxError ? 400 : 500, { error: errorPayload(e) }, cors);
+      const status = e instanceof SyntaxError ? 400 : (e && e.code === 'ETOOBIG') ? 413 : 500;
+      return send(res, status, { error: errorPayload(e) }, cors);
     }
   });
 
@@ -214,7 +224,19 @@ async function start(config = load(), { log = console.log } = {}) {
   const port = boundPort = server.address().port;
   log(`[bridge] listening on http://${b.host}:${port}  (token file: ${b.tokenFile})`);
 
+  // Heartbeat: ping each client periodically so a forwarded port (Codespaces/tunnel) does not drop
+  // the connection as idle during a long session, and so dead peers are reaped instead of leaking.
+  const heartbeat = setInterval(() => {
+    for (const c of clients) {
+      if (!c.authed) continue;
+      if (c.isAlive === false) { c.close(4000, 'ping timeout'); continue; }
+      c.ping();
+    }
+  }, 30000);
+  if (heartbeat.unref) heartbeat.unref();
+
   const close = () => new Promise((resolve) => {
+    clearInterval(heartbeat);
     for (const c of clients) c.close(1001, 'shutting down');
     server.close(() => { try { sql.close(); } catch { /* already closed */ } kv.store.close(); resolve(); });
     server.closeAllConnections();
