@@ -1,0 +1,22 @@
+{
+  "name": "x70mk2-scratch-pipeline",
+  "version": "1.0.0",
+  "description": "Native TurboWarp pipeline: OS bridge daemon, unsandboxed extension, Redis/SQLite data engine, live asset injection and an auto-packaging build watcher",
+  "private": true,
+  "license": "MIT",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "setup": "node tools/setup.js",
+    "bridge": "node --disable-warning=ExperimentalWarning bridge/server.js",
+    "build": "node tools/build.js",
+    "watch": "node tools/watch.js",
+    "twconfig": "node tools/twconfig.js",
+    "test": "node --disable-warning=ExperimentalWarning --test test/*.test.js"
+  },
+  "dependencies": {
+    "@turbowarp/packager": "3.13.0",
+    "jszip": "3.10.1"
+  }
+}

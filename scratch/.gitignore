@@ -1,0 +1,9 @@
+node_modules/
+data/
+dist/
+projects/*.sb3
+projects/*.sb2
+projects/*.sb
+assets/*
+!assets/.gitkeep
+!assets/README.md
