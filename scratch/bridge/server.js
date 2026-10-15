@@ -23,11 +23,30 @@ const ws = require('./ws');
 const redis = require('./redis');
 const { Sql } = require('./sql');
 const rpc = require('./rpc');
+const os = require('os');
 const { BridgeError, resolveIn } = require('./sandbox');
 
 let VERSION = '0.0.0';
 try { VERSION = require('../package.json').version || VERSION; } catch { /* no package.json */ }
 const STARTED_AT = Date.now();
+
+// Lightweight CPU sampler: percent busy since the previous call (good enough for a ~3s poll).
+function cpuSnapshot() {
+  return os.cpus().reduce((a, c) => {
+    const t = c.times;
+    a.idle += t.idle; a.total += t.user + t.nice + t.sys + t.idle + t.irq;
+    return a;
+  }, { idle: 0, total: 0 });
+}
+let lastCpu = cpuSnapshot();
+function cpuPercent() {
+  const now = cpuSnapshot();
+  const idle = now.idle - lastCpu.idle;
+  const total = now.total - lastCpu.total;
+  lastCpu = now;
+  return total > 0 ? Math.round(1000 * (1 - idle / total)) / 10 : 0;
+}
+const memPercent = () => Math.round(1000 * (1 - os.freemem() / os.totalmem())) / 10;
 
 const MIME = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
@@ -142,56 +161,170 @@ async function start(config = load(), { log = console.log } = {}) {
   const landingPage = (req) => {
     const host = esc(String(req.headers.host || `127.0.0.1:${boundPort}`));
     const proto = req.headers['x-forwarded-proto'] || (/^(127\.0\.0\.1|localhost|\[::1\])/.test(host) ? 'http' : 'https');
-    // When reverse-proxied under a path (e.g. /x70), the mount sends x-forwarded-prefix so the
-    // page's own URLs resolve correctly; empty when the bridge is hit directly.
     const prefix = esc(String(req.headers['x-forwarded-prefix'] || '').replace(/\/$/, ''));
     const base = `${proto}://${host}${prefix}`;
     const builds = listBuilds();
-    const buildsHtml = builds.length
-      ? `<ul>${builds.map((f) => `<li><a href="${prefix}/play/${encodeURIComponent(f)}" target="_blank" rel="noopener">&#9654; ${esc(f.replace(/\.html$/, ''))}</a> <span class="mut">(scratch/dist/${esc(f)})</span></li>`).join('')}</ul>`
-      : '<p class="mut">No builds yet — run <code>npm run build</code> and they appear here.</p>';
     return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>x70 Bridge</title>
-<style>:root{color-scheme:light dark;--bg:#f6f8fa;--fg:#1f2328;--mut:#656d76;--card:#fff;--line:#d0d7de;--ok:#1a7f37;--bad:#cf222e;--accent:#1f6feb}
-@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#8b949e;--card:#161b22;--line:#30363d;--ok:#3fb950;--bad:#f85149;--accent:#4493f8}}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;padding:24px}
-.card{max-width:700px;margin:0 auto 16px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px}
-h1{font-size:20px;margin:0 0 4px;display:flex;align-items:center;gap:10px}h2{font-size:15px;margin:20px 0 8px}
-.dot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--ok) 20%,transparent);transition:background .3s}
-.dot.off{background:var(--bad);box-shadow:0 0 0 4px color-mix(in srgb,var(--bad) 20%,transparent)}
-.sub{color:var(--mut);margin:0}.mut{color:var(--mut)}.tag{font:12px ui-monospace,Menlo,monospace;color:var(--mut);border:1px solid var(--line);border-radius:999px;padding:1px 8px;margin-left:6px}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px;margin:18px 0}
-.stat{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
-.stat b{display:block;font-size:18px}.stat span{color:var(--mut);font-size:12px}
-ol{padding-left:20px}ul{padding-left:20px}li{margin:3px 0}
-code{background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:1px 6px;font:13px ui-monospace,Menlo,monospace;word-break:break-all}
-a{color:var(--accent)}.foot{color:var(--mut);font-size:12px;margin-top:4px}</style></head>
-<body><div class="card">
-<h1><span class="dot" id="dot"></span><span id="state">x70 Bridge is running</span><span class="tag">v${esc(VERSION)}</span></h1>
-<p class="sub">Local daemon for high-performance TurboWarp / Scratch projects.</p>
-<div class="grid">
-<div class="stat"><b id="kv">${esc(kv.kind)}</b><span>cache</span></div>
-<div class="stat"><b id="clients">${clients.size}</b><span>connected</span></div>
-<div class="stat"><b id="uptime">0s</b><span>uptime</span></div>
-<div class="stat"><b>${esc(process.platform)}</b><span>${esc(process.version)}</span></div>
+<style>
+:root{color-scheme:light dark;
+ --bg:#f6f8fc;--panel:#ffffff;--panel2:#f3f5fa;--fg:#161a22;--muted:#5b6472;--line:#e6e9f0;
+ --accent:#4f46e5;--accent2:#7c6cf5;--accent-fg:#fff;--ok:#10b981;--warn:#f59e0b;--bad:#ef4444;--track:#e9edf5;--shadow:0 1px 2px rgba(20,25,40,.06),0 8px 24px rgba(20,25,40,.06)}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){
+ --bg:#0a0d14;--panel:#111621;--panel2:#0e131d;--fg:#e8edf5;--muted:#8a94a6;--line:#212838;
+ --accent:#818cf8;--accent2:#a78bfa;--accent-fg:#0a0d14;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--track:#1a2130;--shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35)}}
+:root[data-theme=dark]{
+ --bg:#0a0d14;--panel:#111621;--panel2:#0e131d;--fg:#e8edf5;--muted:#8a94a6;--line:#212838;
+ --accent:#818cf8;--accent2:#a78bfa;--accent-fg:#0a0d14;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--track:#1a2130;--shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35)}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 600px at 100% -10%,color-mix(in srgb,var(--accent) 14%,transparent),transparent),var(--bg);color:var(--fg);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;-webkit-font-smoothing:antialiased;padding:24px}
+.wrap{max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px 22px;box-shadow:var(--shadow)}
+header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.mark{width:34px;height:34px;flex:none;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;color:#fff}
+h1{font-size:19px;margin:0;font-weight:700;letter-spacing:-.01em}
+h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 12px;font-weight:600}
+.sub{color:var(--muted);margin:2px 0 0;font-size:13px}
+.spacer{flex:1}
+.pill{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;padding:5px 11px;border-radius:999px;border:1px solid var(--line);background:var(--panel2)}
+.tag{font:12px ui-monospace,Menlo,monospace;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--ok) 22%,transparent);transition:background .3s,box-shadow .3s}
+.dot.off{background:var(--bad);box-shadow:0 0 0 4px color-mix(in srgb,var(--bad) 22%,transparent)}
+.iconbtn{width:36px;height:36px;border-radius:10px;border:1px solid var(--line);background:var(--panel2);color:var(--fg);cursor:pointer;display:grid;place-items:center;font-size:16px}
+.iconbtn:hover{border-color:var(--accent)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.tile{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:13px 14px}
+.tile .big{font-size:22px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.tile .lbl{color:var(--muted);font-size:12px;margin-top:2px}
+.bar{height:6px;border-radius:999px;background:var(--track);margin-top:9px;overflow:hidden}
+.bar>span{display:block;height:100%;width:0;border-radius:999px;background:var(--accent);transition:width .5s ease,background .3s}
+ol{padding-left:20px;margin:0}ol li{margin:7px 0}
+code{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 7px;font:12.5px ui-monospace,Menlo,monospace;word-break:break-all}
+.row{display:flex;flex-wrap:wrap;gap:9px;margin-top:4px}
+.btn{display:inline-flex;align-items:center;gap:7px;font:inherit;font-size:13.5px;font-weight:600;padding:9px 14px;border-radius:10px;cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--fg);text-decoration:none}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:0}
+.btn.primary:hover{filter:brightness(1.07)}
+.btn:focus-visible,.iconbtn:focus-visible{outline:3px solid color-mix(in srgb,var(--accent) 45%,transparent);outline-offset:2px}
+.games{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+.game{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel2);display:flex;flex-direction:column}
+.game .thumb{height:92px;background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 60%,#000 0%),var(--accent2));display:grid;place-items:center;color:#fff;font-size:30px}
+.game .body{padding:11px 12px;display:flex;flex-direction:column;gap:9px}
+.game .name{font-weight:650;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.game .acts{display:flex;gap:7px}
+.game .acts .btn{padding:7px 11px;font-size:12.5px;flex:1;justify-content:center}
+.empty{color:var(--muted);font-size:13.5px}
+.tokfield{display:none;margin-top:10px;gap:8px;flex-wrap:wrap;align-items:center}
+.tokfield input{flex:1;min-width:200px;font:12.5px ui-monospace,Menlo,monospace;padding:9px 11px;border-radius:9px;border:1px solid var(--line);background:var(--panel2);color:var(--fg)}
+.warn{color:var(--warn);font-size:12.5px;margin-top:7px}
+.foot{color:var(--muted);font-size:12px}
+.foot a{color:var(--accent)}
+#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(16px);background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:13.5px;font-weight:600;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;box-shadow:var(--shadow)}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+@media(max-width:560px){body{padding:14px}.card{padding:16px}}
+</style></head>
+<body><div class="wrap">
+  <div class="card"><header>
+    <div class="mark"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21C9.5 18.4 8.2 15.3 8.2 12S9.5 5.6 12 3z"/></svg></div>
+    <div><h1>x70 Bridge</h1><p class="sub">High-performance TurboWarp / Scratch pipeline</p></div>
+    <div class="spacer"></div>
+    <span class="tag">v${esc(VERSION)}</span>
+    <span class="pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusText">online</span></span>
+    <button class="iconbtn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">◐</button>
+  </header></div>
+
+  <div class="card">
+    <div class="grid">
+      <div class="tile"><div class="big" id="cpu">—</div><div class="lbl">CPU</div><div class="bar"><span id="cpuBar"></span></div></div>
+      <div class="tile"><div class="big" id="mem">—</div><div class="lbl">Memory</div><div class="bar"><span id="memBar"></span></div></div>
+      <div class="tile"><div class="big" id="clients">${clients.size}</div><div class="lbl">connected</div></div>
+      <div class="tile"><div class="big" id="uptime">0s</div><div class="lbl">uptime</div></div>
+      <div class="tile"><div class="big" id="kv" style="font-size:17px">${esc(kv.kind)}</div><div class="lbl">cache</div></div>
+      <div class="tile"><div class="big" style="font-size:16px">${esc(process.platform)}</div><div class="lbl">${esc(process.version)}</div></div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Connect from TurboWarp</h2>
+    <ol>
+      <li>Open <a class="foot" href="https://turbowarp.org/editor" target="_blank" rel="noopener">turbowarp.org/editor</a>, add a <b>custom extension</b> and keep "Run without sandbox" on.</li>
+      <li>Paste the <b>extension URL</b>, then use the <b>pair with bridge</b> block with the URL below and your token.</li>
+      <li>Package standalone games with <code>npm run build</code> — the bridge is baked in.</li>
+    </ol>
+    <div class="row">
+      <button class="btn primary" data-copy="${base}/extension.js">Copy extension URL</button>
+      <button class="btn" data-copy="${base}">Copy bridge URL</button>
+      <button class="btn" id="tokBtn">Reveal &amp; copy token</button>
+      <a class="btn" href="https://turbowarp.org/editor" target="_blank" rel="noopener">Open TurboWarp ↗</a>
+    </div>
+    <div class="tokfield" id="tokField"><input id="tokInput" readonly value=""><button class="btn" data-copyinput="tokInput">Copy</button></div>
+    <p class="warn" id="tokWarn" style="display:none">⚠ This token grants access to the bridge. Keep this forwarded port Private.</p>
+  </div>
+
+  <div class="card">
+    <h2>Playable builds <span class="sub" id="gamesCount"></span></h2>
+    <div class="games" id="games"></div>
+    <p class="empty" id="gamesEmpty">No builds yet — run <code>npm run build</code> and they appear here instantly.</p>
+  </div>
+
+  <p class="foot" style="text-align:center">Live JSON <a href="${prefix}/health">${prefix}/health</a> · Extension <a href="${prefix}/extension.js">${prefix}/extension.js</a> · The token is hidden until you reveal it.</p>
 </div>
-<h2>Connect from TurboWarp</h2>
-<ol>
-<li>Add a custom extension from <code>${base}/extension.js</code> (keep "Run without sandbox" on).</li>
-<li>Use the <b>pair with bridge</b> block once with <code>${base}</code> and your token from <code>scratch/data/bridge.token</code>.</li>
-<li>Build standalone games with <code>npm run build</code> — the bridge is baked in.</li>
-</ol>
-<h2>Built games (${builds.length})</h2>
-${buildsHtml}
-<p class="foot">Live JSON: <a href="${prefix}/health">${prefix}/health</a> · Extension: <a href="${prefix}/extension.js">${prefix}/extension.js</a> · This page never shows your token.</p>
-</div>
+<div id="toast"></div>
 <script>
-const fmt=s=>{s=Math.floor(s);return s<60?s+"s":s<3600?Math.floor(s/60)+"m "+(s%60)+"s":Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"m"};
-async function tick(){try{const r=await fetch("${prefix}/health",{cache:"no-store"});const j=await r.json();
-document.getElementById("kv").textContent=j.kv;document.getElementById("clients").textContent=j.clients;
-document.getElementById("uptime").textContent=fmt(j.uptime||0);
-document.getElementById("dot").classList.remove("off");document.getElementById("state").textContent="x70 Bridge is running";
-}catch(e){document.getElementById("dot").classList.add("off");document.getElementById("state").textContent="bridge unreachable";}}
+var P=${JSON.stringify(prefix)};
+var BUILDS=${JSON.stringify(builds)};
+function $(id){return document.getElementById(id)}
+function fmt(s){s=Math.floor(s||0);return s<60?s+"s":s<3600?Math.floor(s/60)+"m "+(s%60)+"s":Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"m"}
+var toastT;
+function toast(m){var t=$("toast");t.textContent=m;t.classList.add("show");clearTimeout(toastT);toastT=setTimeout(function(){t.classList.remove("show")},1600)}
+function copy(text){if(navigator.clipboard&&navigator.clipboard.writeText){return navigator.clipboard.writeText(text).then(function(){toast("Copied")},function(){window.prompt("Copy:",text)})}window.prompt("Copy:",text)}
+document.addEventListener("click",function(e){
+  var c=e.target.closest&&e.target.closest("[data-copy]");if(c){copy(c.getAttribute("data-copy"));return}
+  var ci=e.target.closest&&e.target.closest("[data-copyinput]");if(ci){copy($(ci.getAttribute("data-copyinput")).value);return}
+});
+// theme toggle: auto -> light -> dark
+var THEMES=["auto","light","dark"],GL={auto:"◐",light:"☀",dark:"☾"};
+var theme="auto";try{theme=localStorage.getItem("x70-theme")||"auto"}catch(e){}
+function applyTheme(){if(theme==="auto"){delete document.documentElement.dataset.theme}else{document.documentElement.dataset.theme=theme}$("themeBtn").textContent=GL[theme];try{localStorage.setItem("x70-theme",theme)}catch(e){}}
+$("themeBtn").addEventListener("click",function(){theme=THEMES[(THEMES.indexOf(theme)+1)%3];applyTheme();toast("Theme: "+theme)});
+applyTheme();
+// reveal token
+$("tokBtn").addEventListener("click",function(){
+  fetch(P+"/token",{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){
+    $("tokInput").value=j.token;$("tokField").style.display="flex";$("tokWarn").style.display="block";copy(j.token);
+  }).catch(function(){toast("Could not read token")});
+});
+// games
+function barColor(v){return v<60?"var(--accent)":v<85?"var(--warn)":"var(--bad)"}
+function renderGames(list){
+  var g=$("games");g.innerHTML="";
+  if(!list||!list.length){$("gamesEmpty").style.display="";$("gamesCount").textContent="";return}
+  $("gamesEmpty").style.display="none";$("gamesCount").textContent="("+list.length+")";
+  list.forEach(function(f){
+    var name=f.replace(/\\.html$/,"");var url=P+"/play/"+encodeURIComponent(f);
+    var el=document.createElement("div");el.className="game";
+    var thumb=document.createElement("div");thumb.className="thumb";thumb.textContent="🎮";
+    var body=document.createElement("div");body.className="body";
+    var nm=document.createElement("div");nm.className="name";nm.textContent=name;nm.title=name;
+    var acts=document.createElement("div");acts.className="acts";
+    var play=document.createElement("a");play.className="btn primary";play.href=url;play.target="_blank";play.rel="noopener";play.textContent="▶ Play";
+    var cp=document.createElement("button");cp.className="btn";cp.textContent="Link";cp.addEventListener("click",function(){copy(location.origin+url)});
+    acts.appendChild(play);acts.appendChild(cp);body.appendChild(nm);body.appendChild(acts);el.appendChild(thumb);el.appendChild(body);g.appendChild(el);
+  });
+}
+renderGames(BUILDS);
+// live stats
+function setBar(id,v){var b=$(id);b.style.width=Math.max(0,Math.min(100,v))+"%";b.style.background=barColor(v)}
+function online(j){
+  $("statusDot").classList.remove("off");$("statusText").textContent="online";
+  $("cpu").textContent=(j.cpu!=null?j.cpu:0)+"%";setBar("cpuBar",j.cpu||0);
+  $("mem").textContent=(j.mem!=null?j.mem:0)+"%";setBar("memBar",j.mem||0);
+  $("clients").textContent=j.clients;$("uptime").textContent=fmt(j.uptime);$("kv").textContent=j.kv;
+}
+function offline(){$("statusDot").classList.add("off");$("statusText").textContent="offline"}
+function tick(){fetch(P+"/health",{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){online(j);
+  fetch(P+"/games",{cache:"no-store"}).then(function(r){return r.json()}).then(function(g){if((g.builds||[]).length!==($("games").children.length))renderGames(g.builds)}).catch(function(){});
+}).catch(offline)}
 tick();setInterval(tick,3000);
 </script></body></html>`;
   };
@@ -215,7 +348,17 @@ tick();setInterval(tick,3000);
         return send(res, 200, landingPage(req), { ...cors, 'Content-Type': 'text/html; charset=utf-8' });
       }
       if (req.method === 'GET' && url.pathname === '/health') {
-        return send(res, 200, { ok: true, version: VERSION, kv: kv.kind, clients: clients.size, platform: process.platform, node: process.version, uptime: (Date.now() - STARTED_AT) / 1000 }, cors);
+        return send(res, 200, {
+          ok: true, version: VERSION, kv: kv.kind, clients: clients.size,
+          platform: process.platform, node: process.version, uptime: (Date.now() - STARTED_AT) / 1000,
+          cpu: cpuPercent(), mem: memPercent(), totalMem: os.totalmem(), load: os.loadavg()[0],
+          games: listBuilds().length,
+        }, cors);
+      }
+      if (req.method === 'GET' && url.pathname === '/token') {
+        // The pairing token, for the dashboard's "reveal & copy" action. It grants bridge access,
+        // so the dashboard warns and only fetches it on an explicit click; keep the port private.
+        return send(res, 200, { token: b.token }, { ...cors, 'Cache-Control': 'no-store' });
       }
       if (req.method === 'GET' && url.pathname === '/extension.js') {
         return send(res, 200, fs.readFileSync(EXTENSION_FILE), { ...cors, 'Content-Type': 'text/javascript; charset=utf-8' });
