@@ -24,6 +24,7 @@ const redis = require('./redis');
 const { Sql } = require('./sql');
 const rpc = require('./rpc');
 const os = require('os');
+const { spawn } = require('child_process');
 const { BridgeError, resolveIn } = require('./sandbox');
 
 let VERSION = '0.0.0';
@@ -150,6 +151,38 @@ async function start(config = load(), { log = console.log } = {}) {
     req.on('error', reject);
   });
 
+  // Binary body (for .sb3 uploads to /build).
+  const readRaw = (req, limit) => new Promise((resolve, reject) => {
+    const parts = []; let n = 0;
+    req.on('data', (d) => {
+      n += d.length;
+      if (n > limit) { reject(new BridgeError('ETOOBIG', 'Upload too large')); req.destroy(); } else parts.push(d);
+    });
+    req.on('end', () => resolve(Buffer.concat(parts)));
+    req.on('error', reject);
+  });
+
+  const SAFE_SB3 = /^[A-Za-z0-9._ -]+\.(sb3|sb2|sb)$/;
+  const SAFE_HTML = /^[A-Za-z0-9._-]+\.html$/;
+
+  // Package an uploaded project by spawning the build tool in a child process (isolated from the
+  // bridge event loop). The built game is paired to this same origin so it works from the port.
+  function runBuild(absFile, publicBase) {
+    return new Promise((resolve) => {
+      const args = ['--disable-warning=ExperimentalWarning', path.join(config.root, 'tools', 'build.js'), absFile, '--target=html'];
+      const env = { ...process.env };
+      if (publicBase) env.X70_BRIDGE_PUBLIC_URL = publicBase;
+      const child = spawn(process.execPath, args, { cwd: config.root, env });
+      const out = [];
+      const grab = (d) => { if (out.join('').length < 20000) out.push(d.toString()); };
+      child.stdout.on('data', grab);
+      child.stderr.on('data', grab);
+      const timer = setTimeout(() => child.kill('SIGKILL'), 240000);
+      child.on('error', (e) => { clearTimeout(timer); resolve({ code: -1, log: e.message }); });
+      child.on('close', (code) => { clearTimeout(timer); resolve({ code, log: out.join('') }); });
+    });
+  }
+
   const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const listBuilds = () => {
     try { return fs.readdirSync(config.build.outDir).filter((f) => f.endsWith('.html')).sort(); }
@@ -158,175 +191,13 @@ async function start(config = load(), { log = console.log } = {}) {
   // A token-free status page at GET / so opening the forwarded-port URL shows "it works", the
   // version, the built games, and the connection steps — never the token. Stats refresh live from
   // /health so it is visibly a running Node page. The extension URL is built from the request host.
-  const landingPage = (req) => {
-    const host = esc(String(req.headers.host || `127.0.0.1:${boundPort}`));
-    const proto = req.headers['x-forwarded-proto'] || (/^(127\.0\.0\.1|localhost|\[::1\])/.test(host) ? 'http' : 'https');
-    const prefix = esc(String(req.headers['x-forwarded-prefix'] || '').replace(/\/$/, ''));
-    const base = `${proto}://${host}${prefix}`;
-    const builds = listBuilds();
-    return `<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>x70 Bridge</title>
-<style>
-:root{color-scheme:light dark;
- --bg:#f6f8fc;--panel:#ffffff;--panel2:#f3f5fa;--fg:#161a22;--muted:#5b6472;--line:#e6e9f0;
- --accent:#4f46e5;--accent2:#7c6cf5;--accent-fg:#fff;--ok:#10b981;--warn:#f59e0b;--bad:#ef4444;--track:#e9edf5;--shadow:0 1px 2px rgba(20,25,40,.06),0 8px 24px rgba(20,25,40,.06)}
-@media(prefers-color-scheme:dark){:root:not([data-theme=light]){
- --bg:#0a0d14;--panel:#111621;--panel2:#0e131d;--fg:#e8edf5;--muted:#8a94a6;--line:#212838;
- --accent:#818cf8;--accent2:#a78bfa;--accent-fg:#0a0d14;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--track:#1a2130;--shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35)}}
-:root[data-theme=dark]{
- --bg:#0a0d14;--panel:#111621;--panel2:#0e131d;--fg:#e8edf5;--muted:#8a94a6;--line:#212838;
- --accent:#818cf8;--accent2:#a78bfa;--accent-fg:#0a0d14;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--track:#1a2130;--shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35)}
-*{box-sizing:border-box}
-body{margin:0;background:radial-gradient(1200px 600px at 100% -10%,color-mix(in srgb,var(--accent) 14%,transparent),transparent),var(--bg);color:var(--fg);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;-webkit-font-smoothing:antialiased;padding:24px}
-.wrap{max-width:860px;margin:0 auto;display:flex;flex-direction:column;gap:16px}
-.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px 22px;box-shadow:var(--shadow)}
-header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
-.mark{width:34px;height:34px;flex:none;border-radius:10px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;color:#fff}
-h1{font-size:19px;margin:0;font-weight:700;letter-spacing:-.01em}
-h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 12px;font-weight:600}
-.sub{color:var(--muted);margin:2px 0 0;font-size:13px}
-.spacer{flex:1}
-.pill{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;padding:5px 11px;border-radius:999px;border:1px solid var(--line);background:var(--panel2)}
-.tag{font:12px ui-monospace,Menlo,monospace;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:2px 9px}
-.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--ok) 22%,transparent);transition:background .3s,box-shadow .3s}
-.dot.off{background:var(--bad);box-shadow:0 0 0 4px color-mix(in srgb,var(--bad) 22%,transparent)}
-.iconbtn{width:36px;height:36px;border-radius:10px;border:1px solid var(--line);background:var(--panel2);color:var(--fg);cursor:pointer;display:grid;place-items:center;font-size:16px}
-.iconbtn:hover{border-color:var(--accent)}
-.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
-.tile{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:13px 14px}
-.tile .big{font-size:22px;font-weight:700;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
-.tile .lbl{color:var(--muted);font-size:12px;margin-top:2px}
-.bar{height:6px;border-radius:999px;background:var(--track);margin-top:9px;overflow:hidden}
-.bar>span{display:block;height:100%;width:0;border-radius:999px;background:var(--accent);transition:width .5s ease,background .3s}
-ol{padding-left:20px;margin:0}ol li{margin:7px 0}
-code{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 7px;font:12.5px ui-monospace,Menlo,monospace;word-break:break-all}
-.row{display:flex;flex-wrap:wrap;gap:9px;margin-top:4px}
-.btn{display:inline-flex;align-items:center;gap:7px;font:inherit;font-size:13.5px;font-weight:600;padding:9px 14px;border-radius:10px;cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--fg);text-decoration:none}
-.btn:hover{border-color:var(--accent)}
-.btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:0}
-.btn.primary:hover{filter:brightness(1.07)}
-.btn:focus-visible,.iconbtn:focus-visible{outline:3px solid color-mix(in srgb,var(--accent) 45%,transparent);outline-offset:2px}
-.games{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
-.game{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel2);display:flex;flex-direction:column}
-.game .thumb{height:92px;background:linear-gradient(135deg,color-mix(in srgb,var(--accent) 60%,#000 0%),var(--accent2));display:grid;place-items:center;color:#fff;font-size:30px}
-.game .body{padding:11px 12px;display:flex;flex-direction:column;gap:9px}
-.game .name{font-weight:650;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.game .acts{display:flex;gap:7px}
-.game .acts .btn{padding:7px 11px;font-size:12.5px;flex:1;justify-content:center}
-.empty{color:var(--muted);font-size:13.5px}
-.tokfield{display:none;margin-top:10px;gap:8px;flex-wrap:wrap;align-items:center}
-.tokfield input{flex:1;min-width:200px;font:12.5px ui-monospace,Menlo,monospace;padding:9px 11px;border-radius:9px;border:1px solid var(--line);background:var(--panel2);color:var(--fg)}
-.warn{color:var(--warn);font-size:12.5px;margin-top:7px}
-.foot{color:var(--muted);font-size:12px}
-.foot a{color:var(--accent)}
-#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(16px);background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:13.5px;font-weight:600;opacity:0;pointer-events:none;transition:opacity .2s,transform .2s;box-shadow:var(--shadow)}
-#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
-@media(max-width:560px){body{padding:14px}.card{padding:16px}}
-</style></head>
-<body><div class="wrap">
-  <div class="card"><header>
-    <div class="mark"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21C9.5 18.4 8.2 15.3 8.2 12S9.5 5.6 12 3z"/></svg></div>
-    <div><h1>x70 Bridge</h1><p class="sub">High-performance TurboWarp / Scratch pipeline</p></div>
-    <div class="spacer"></div>
-    <span class="tag">v${esc(VERSION)}</span>
-    <span class="pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusText">online</span></span>
-    <button class="iconbtn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">◐</button>
-  </header></div>
-
-  <div class="card">
-    <div class="grid">
-      <div class="tile"><div class="big" id="cpu">—</div><div class="lbl">CPU</div><div class="bar"><span id="cpuBar"></span></div></div>
-      <div class="tile"><div class="big" id="mem">—</div><div class="lbl">Memory</div><div class="bar"><span id="memBar"></span></div></div>
-      <div class="tile"><div class="big" id="clients">${clients.size}</div><div class="lbl">connected</div></div>
-      <div class="tile"><div class="big" id="uptime">0s</div><div class="lbl">uptime</div></div>
-      <div class="tile"><div class="big" id="kv" style="font-size:17px">${esc(kv.kind)}</div><div class="lbl">cache</div></div>
-      <div class="tile"><div class="big" style="font-size:16px">${esc(process.platform)}</div><div class="lbl">${esc(process.version)}</div></div>
-    </div>
-  </div>
-
-  <div class="card">
-    <h2>Connect from TurboWarp</h2>
-    <ol>
-      <li>Open <a class="foot" href="https://turbowarp.org/editor" target="_blank" rel="noopener">turbowarp.org/editor</a>, add a <b>custom extension</b> and keep "Run without sandbox" on.</li>
-      <li>Paste the <b>extension URL</b>, then use the <b>pair with bridge</b> block with the URL below and your token.</li>
-      <li>Package standalone games with <code>npm run build</code> — the bridge is baked in.</li>
-    </ol>
-    <div class="row">
-      <button class="btn primary" data-copy="${base}/extension.js">Copy extension URL</button>
-      <button class="btn" data-copy="${base}">Copy bridge URL</button>
-      <button class="btn" id="tokBtn">Reveal &amp; copy token</button>
-      <a class="btn" href="https://turbowarp.org/editor" target="_blank" rel="noopener">Open TurboWarp ↗</a>
-    </div>
-    <div class="tokfield" id="tokField"><input id="tokInput" readonly value=""><button class="btn" data-copyinput="tokInput">Copy</button></div>
-    <p class="warn" id="tokWarn" style="display:none">⚠ This token grants access to the bridge. Keep this forwarded port Private.</p>
-  </div>
-
-  <div class="card">
-    <h2>Playable builds <span class="sub" id="gamesCount"></span></h2>
-    <div class="games" id="games"></div>
-    <p class="empty" id="gamesEmpty">No builds yet — run <code>npm run build</code> and they appear here instantly.</p>
-  </div>
-
-  <p class="foot" style="text-align:center">Live JSON <a href="${prefix}/health">${prefix}/health</a> · Extension <a href="${prefix}/extension.js">${prefix}/extension.js</a> · The token is hidden until you reveal it.</p>
-</div>
-<div id="toast"></div>
-<script>
-var P=${JSON.stringify(prefix)};
-var BUILDS=${JSON.stringify(builds)};
-function $(id){return document.getElementById(id)}
-function fmt(s){s=Math.floor(s||0);return s<60?s+"s":s<3600?Math.floor(s/60)+"m "+(s%60)+"s":Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"m"}
-var toastT;
-function toast(m){var t=$("toast");t.textContent=m;t.classList.add("show");clearTimeout(toastT);toastT=setTimeout(function(){t.classList.remove("show")},1600)}
-function copy(text){if(navigator.clipboard&&navigator.clipboard.writeText){return navigator.clipboard.writeText(text).then(function(){toast("Copied")},function(){window.prompt("Copy:",text)})}window.prompt("Copy:",text)}
-document.addEventListener("click",function(e){
-  var c=e.target.closest&&e.target.closest("[data-copy]");if(c){copy(c.getAttribute("data-copy"));return}
-  var ci=e.target.closest&&e.target.closest("[data-copyinput]");if(ci){copy($(ci.getAttribute("data-copyinput")).value);return}
-});
-// theme toggle: auto -> light -> dark
-var THEMES=["auto","light","dark"],GL={auto:"◐",light:"☀",dark:"☾"};
-var theme="auto";try{theme=localStorage.getItem("x70-theme")||"auto"}catch(e){}
-function applyTheme(){if(theme==="auto"){delete document.documentElement.dataset.theme}else{document.documentElement.dataset.theme=theme}$("themeBtn").textContent=GL[theme];try{localStorage.setItem("x70-theme",theme)}catch(e){}}
-$("themeBtn").addEventListener("click",function(){theme=THEMES[(THEMES.indexOf(theme)+1)%3];applyTheme();toast("Theme: "+theme)});
-applyTheme();
-// reveal token
-$("tokBtn").addEventListener("click",function(){
-  fetch(P+"/token",{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){
-    $("tokInput").value=j.token;$("tokField").style.display="flex";$("tokWarn").style.display="block";copy(j.token);
-  }).catch(function(){toast("Could not read token")});
-});
-// games
-function barColor(v){return v<60?"var(--accent)":v<85?"var(--warn)":"var(--bad)"}
-function renderGames(list){
-  var g=$("games");g.innerHTML="";
-  if(!list||!list.length){$("gamesEmpty").style.display="";$("gamesCount").textContent="";return}
-  $("gamesEmpty").style.display="none";$("gamesCount").textContent="("+list.length+")";
-  list.forEach(function(f){
-    var name=f.replace(/\\.html$/,"");var url=P+"/play/"+encodeURIComponent(f);
-    var el=document.createElement("div");el.className="game";
-    var thumb=document.createElement("div");thumb.className="thumb";thumb.textContent="🎮";
-    var body=document.createElement("div");body.className="body";
-    var nm=document.createElement("div");nm.className="name";nm.textContent=name;nm.title=name;
-    var acts=document.createElement("div");acts.className="acts";
-    var play=document.createElement("a");play.className="btn primary";play.href=url;play.target="_blank";play.rel="noopener";play.textContent="▶ Play";
-    var cp=document.createElement("button");cp.className="btn";cp.textContent="Link";cp.addEventListener("click",function(){copy(location.origin+url)});
-    acts.appendChild(play);acts.appendChild(cp);body.appendChild(nm);body.appendChild(acts);el.appendChild(thumb);el.appendChild(body);g.appendChild(el);
-  });
-}
-renderGames(BUILDS);
-// live stats
-function setBar(id,v){var b=$(id);b.style.width=Math.max(0,Math.min(100,v))+"%";b.style.background=barColor(v)}
-function online(j){
-  $("statusDot").classList.remove("off");$("statusText").textContent="online";
-  $("cpu").textContent=(j.cpu!=null?j.cpu:0)+"%";setBar("cpuBar",j.cpu||0);
-  $("mem").textContent=(j.mem!=null?j.mem:0)+"%";setBar("memBar",j.mem||0);
-  $("clients").textContent=j.clients;$("uptime").textContent=fmt(j.uptime);$("kv").textContent=j.kv;
-}
-function offline(){$("statusDot").classList.add("off");$("statusText").textContent="offline"}
-function tick(){fetch(P+"/health",{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){online(j);
-  fetch(P+"/games",{cache:"no-store"}).then(function(r){return r.json()}).then(function(g){if((g.builds||[]).length!==($("games").children.length))renderGames(g.builds)}).catch(function(){});
-}).catch(offline)}
-tick();setInterval(tick,3000);
-</script></body></html>`;
+  const STUDIO_FILE = path.join(__dirname, 'studio.html');
+  const CONFIG_FILE = process.env.X70_CONFIG || path.join(config.root, 'pipeline.config.json');
+  // The full Studio web app (bridge/studio.html), with the mount prefix and version injected so
+  // its relative URLs resolve whether it is hit directly (7070) or under the /x70 mount.
+  const studioPage = (req) => {
+    const prefix = String(req.headers['x-forwarded-prefix'] || '').replace(/\/$/, '');
+    return fs.readFileSync(STUDIO_FILE, 'utf8').split('__X70_PREFIX__').join(prefix).split('__X70_VERSION__').join(VERSION);
   };
 
   const server = http.createServer(async (req, res) => {
@@ -345,7 +216,19 @@ tick();setInterval(tick,3000);
 
     try {
       if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/status')) {
-        return send(res, 200, landingPage(req), { ...cors, 'Content-Type': 'text/html; charset=utf-8' });
+        return send(res, 200, studioPage(req), { ...cors, 'Content-Type': 'text/html; charset=utf-8' });
+      }
+      if (req.method === 'GET' && url.pathname === '/config') {
+        let runtime = config.runtime;
+        try { runtime = { ...runtime, ...(JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')).runtime || {}) }; } catch { /* use loaded */ }
+        return send(res, 200, { runtime }, cors);
+      }
+      if (req.method === 'GET' && url.pathname.startsWith('/download/')) {
+        const name = decodeURIComponent(url.pathname.slice('/download/'.length));
+        if (!/^[A-Za-z0-9._-]+\.html$/.test(name) || !listBuilds().includes(name)) return send(res, 404, 'No such game', cors);
+        const data = await fs.promises.readFile(path.join(config.build.outDir, name)).catch(() => null);
+        if (!data) return send(res, 404, 'No such game', cors);
+        return send(res, 200, data, { ...cors, 'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${name}"`, 'Cache-Control': 'no-store' });
       }
       if (req.method === 'GET' && url.pathname === '/health') {
         return send(res, 200, {
@@ -379,6 +262,42 @@ tick();setInterval(tick,3000);
         return send(res, 200, data, { ...cors, 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       }
       if (!tokenOk(reqToken(req, url), b.token)) return send(res, 401, 'Missing or wrong bridge token', cors);
+
+      if (req.method === 'POST' && url.pathname === '/build') {
+        const name = String(url.searchParams.get('name') || '').trim();
+        if (!SAFE_SB3.test(name)) return send(res, 400, { error: { code: 'ENAME', message: 'name must be a .sb3 / .sb2 file' } }, cors);
+        const data = await readRaw(req, b.maxFileBytes);
+        if (!data.length) return send(res, 400, { error: { code: 'EEMPTY', message: 'empty upload' } }, cors);
+        await fs.promises.mkdir(config.build.projectsDir, { recursive: true });
+        const absFile = path.join(config.build.projectsDir, name);
+        await fs.promises.writeFile(absFile, data);
+        const host = String(req.headers.host || '');
+        const proto = req.headers['x-forwarded-proto'] || (/^(127\.0\.0\.1|localhost|\[::1\])/.test(host) ? 'http' : 'https');
+        const prefix = String(req.headers['x-forwarded-prefix'] || '').replace(/\/$/, '');
+        const publicBase = host ? `${proto}://${host}${prefix}` : '';
+        const r = await runBuild(absFile, publicBase);
+        const game = name.replace(/\.(sb3|sb2|sb)$/i, '.html');
+        if (r.code === 0 && listBuilds().includes(game)) return send(res, 200, { ok: true, game, log: r.log }, cors);
+        return send(res, 200, { error: { code: 'EBUILD', message: 'Build failed (is @turbowarp/packager installed? run `cd scratch && npm install`)' }, log: r.log }, cors);
+      }
+      if (req.method === 'POST' && url.pathname === '/config') {
+        const body = JSON.parse((await readBody(req, 65536)) || '{}');
+        const rt = body.runtime || {};
+        const allowed = ['framerate', 'interpolation', 'turbo', 'highQualityPen', 'warpTimer', 'maxClones', 'fencing', 'miscLimits', 'stageWidth', 'stageHeight', 'maxTextureDimension'];
+        let file = {};
+        try { file = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8')); } catch { /* new file */ }
+        file.runtime = file.runtime || {};
+        for (const k of allowed) if (k in rt) file.runtime[k] = rt[k];
+        await fs.promises.writeFile(CONFIG_FILE, JSON.stringify(file, null, 2) + '\n');
+        return send(res, 200, { ok: true, runtime: file.runtime }, cors);
+      }
+      if (req.method === 'POST' && url.pathname === '/games/delete') {
+        const body = JSON.parse((await readBody(req, 4096)) || '{}');
+        const name = String(body.name || '');
+        if (!SAFE_HTML.test(name) || !listBuilds().includes(name)) return send(res, 404, { error: { code: 'ENOENT', message: 'No such game' } }, cors);
+        await fs.promises.rm(path.join(config.build.outDir, name), { force: true });
+        return send(res, 200, { ok: true }, cors);
+      }
 
       if (req.method === 'GET' && url.pathname.startsWith('/assets/')) {
         const rel = decodeURIComponent(url.pathname.slice('/assets/'.length));

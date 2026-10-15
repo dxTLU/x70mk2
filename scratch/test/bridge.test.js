@@ -158,7 +158,7 @@ test('the root status page is served without a token and never leaks it', () => 
   });
   assert.equal(res.status, 200);
   assert.match(res.type, /text\/html/);
-  assert.match(res.body, /x70 Bridge/);
+  assert.match(res.body, /x70 Studio/);
   assert.ok(!res.body.includes(config.bridge.token), 'status page must not contain the token');
 }));
 

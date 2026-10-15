@@ -1,0 +1,404 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>x70 Studio</title>
+<style>
+:root{color-scheme:light dark;
+ --bg:#f6f8fc;--panel:#ffffff;--panel2:#f3f5fa;--fg:#161a22;--muted:#5b6472;--line:#e6e9f0;
+ --accent:#4f46e5;--accent2:#7c6cf5;--accent-fg:#fff;--ok:#10b981;--warn:#f59e0b;--bad:#ef4444;--track:#e9edf5;--shadow:0 1px 2px rgba(20,25,40,.06),0 8px 24px rgba(20,25,40,.06)}
+@media(prefers-color-scheme:dark){:root:not([data-theme=light]){
+ --bg:#0a0d14;--panel:#111621;--panel2:#0e131d;--fg:#e8edf5;--muted:#8a94a6;--line:#212838;
+ --accent:#818cf8;--accent2:#a78bfa;--accent-fg:#0a0d14;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--track:#1a2130;--shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35)}}
+:root[data-theme=dark]{
+ --bg:#0a0d14;--panel:#111621;--panel2:#0e131d;--fg:#e8edf5;--muted:#8a94a6;--line:#212838;
+ --accent:#818cf8;--accent2:#a78bfa;--accent-fg:#0a0d14;--ok:#34d399;--warn:#fbbf24;--bad:#f87171;--track:#1a2130;--shadow:0 1px 2px rgba(0,0,0,.4),0 10px 30px rgba(0,0,0,.35)}
+*{box-sizing:border-box}
+body{margin:0;background:radial-gradient(1200px 600px at 100% -10%,color-mix(in srgb,var(--accent) 14%,transparent),transparent),var(--bg);color:var(--fg);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,system-ui,sans-serif;-webkit-font-smoothing:antialiased}
+.wrap{max-width:960px;margin:0 auto;padding:22px 20px 60px;display:flex;flex-direction:column;gap:16px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:20px 22px;box-shadow:var(--shadow)}
+header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.mark{width:36px;height:36px;flex:none;border-radius:11px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;color:#fff}
+h1{font-size:19px;margin:0;font-weight:750;letter-spacing:-.01em}
+h2{font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 12px;font-weight:600}
+h3{font-size:14px;margin:0 0 8px}
+.sub{color:var(--muted);margin:2px 0 0;font-size:13px}.mut{color:var(--muted)}
+.spacer{flex:1}
+.pill{display:inline-flex;align-items:center;gap:7px;font-size:12.5px;font-weight:600;padding:5px 11px;border-radius:999px;border:1px solid var(--line);background:var(--panel2)}
+.tag{font:12px ui-monospace,Menlo,monospace;color:var(--muted);border:1px solid var(--line);border-radius:999px;padding:2px 9px}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--ok) 22%,transparent);transition:.3s}
+.dot.off{background:var(--bad);box-shadow:0 0 0 4px color-mix(in srgb,var(--bad) 22%,transparent)}
+.iconbtn{width:36px;height:36px;border-radius:10px;border:1px solid var(--line);background:var(--panel2);color:var(--fg);cursor:pointer;display:grid;place-items:center;font-size:16px}
+.iconbtn:hover{border-color:var(--accent)}
+.tabs{display:flex;gap:6px;flex-wrap:wrap;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:6px;box-shadow:var(--shadow)}
+.tab{flex:1;min-width:90px;text-align:center;padding:9px 12px;border-radius:9px;cursor:pointer;font-weight:600;font-size:13.5px;color:var(--muted);border:1px solid transparent;user-select:none}
+.tab:hover{color:var(--fg)}
+.tab.active{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff}
+.panel{display:none;flex-direction:column;gap:16px}.panel.active{display:flex}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px}
+.tile{background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:13px 14px}
+.tile .big{font-size:22px;font-weight:750;letter-spacing:-.02em;font-variant-numeric:tabular-nums}
+.tile .lbl{color:var(--muted);font-size:12px;margin-top:2px}
+.bar{height:6px;border-radius:999px;background:var(--track);margin-top:9px;overflow:hidden}
+.bar>span{display:block;height:100%;width:0;border-radius:999px;background:var(--accent);transition:width .5s ease,background .3s}
+.chips{display:flex;flex-wrap:wrap;gap:8px;list-style:none;margin:0;padding:0}
+.chip{display:inline-flex;align-items:center;gap:6px;font-size:12.5px;padding:6px 11px;border-radius:999px;border:1px solid var(--line);background:var(--panel2);color:var(--fg);text-decoration:none;cursor:default}
+.row{display:flex;flex-wrap:wrap;gap:9px}
+.btn{display:inline-flex;align-items:center;gap:7px;font:inherit;font-size:13.5px;font-weight:600;padding:9px 14px;border-radius:10px;cursor:pointer;border:1px solid var(--line);background:var(--panel2);color:var(--fg);text-decoration:none}
+.btn:hover{border-color:var(--accent)}
+.btn.primary{background:linear-gradient(135deg,var(--accent),var(--accent2));color:#fff;border:0}
+.btn.primary:hover{filter:brightness(1.07)}
+.btn.bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,var(--line))}
+.btn:disabled{opacity:.5;cursor:default}
+.btn:focus-visible,.iconbtn:focus-visible,.tab:focus-visible{outline:3px solid color-mix(in srgb,var(--accent) 45%,transparent);outline-offset:2px}
+code{background:var(--panel2);border:1px solid var(--line);border-radius:6px;padding:2px 7px;font:12.5px ui-monospace,Menlo,monospace;word-break:break-all}
+input,select,textarea{font:inherit;color:var(--fg);background:var(--panel2);border:1px solid var(--line);border-radius:9px;padding:9px 11px}
+textarea{width:100%;font:12.5px ui-monospace,Menlo,monospace;resize:vertical}
+input:focus,select:focus,textarea:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 3px color-mix(in srgb,var(--accent) 22%,transparent)}
+label.opt{display:flex;align-items:center;gap:9px;padding:9px 11px;border:1px solid var(--line);border-radius:10px;background:var(--panel2);cursor:pointer;font-size:13.5px}
+label.opt input{width:16px;height:16px}
+.drop{border:2px dashed var(--line);border-radius:14px;padding:30px;text-align:center;color:var(--muted);cursor:pointer;transition:.15s;background:var(--panel2)}
+.drop.over{border-color:var(--accent);color:var(--fg);background:color-mix(in srgb,var(--accent) 8%,var(--panel2))}
+.games{display:grid;grid-template-columns:repeat(auto-fill,minmax(210px,1fr));gap:12px}
+.game{border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--panel2);display:flex;flex-direction:column}
+.game .thumb{height:88px;background:linear-gradient(135deg,var(--accent),var(--accent2));display:grid;place-items:center;color:#fff;font-size:30px}
+.game .body{padding:11px 12px;display:flex;flex-direction:column;gap:9px}
+.game .name{font-weight:650;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.game .acts{display:flex;gap:7px;flex-wrap:wrap}
+.game .acts .btn{padding:7px 10px;font-size:12px}
+.empty{color:var(--muted);font-size:13.5px}
+.out{background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:12px;font:12px ui-monospace,Menlo,monospace;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow:auto;margin:0}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{text-align:left;padding:7px 9px;border-bottom:1px solid var(--line);white-space:nowrap}
+th{color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+.tscroll{overflow:auto;max-height:340px;border:1px solid var(--line);border-radius:10px}
+.subtabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px}
+.subtab{padding:6px 12px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);cursor:pointer;font-size:12.5px;font-weight:600}
+.subtab.active{background:var(--accent);color:#fff;border-color:transparent}
+.spin{display:inline-block;width:14px;height:14px;border:2px solid currentColor;border-right-color:transparent;border-radius:50%;animation:sp .7s linear infinite;vertical-align:-2px}
+@keyframes sp{to{transform:rotate(360deg)}}
+.warn{color:var(--warn);font-size:12.5px}
+.foot{color:var(--muted);font-size:12px;text-align:center}.foot a{color:var(--accent)}
+#toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%) translateY(16px);background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:10px;font-size:13.5px;font-weight:600;opacity:0;pointer-events:none;transition:.2s;box-shadow:var(--shadow);z-index:20;max-width:90vw}
+#toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
+@media(max-width:560px){.wrap{padding:14px}.card{padding:16px}}
+</style></head>
+<body><div class="wrap">
+  <div class="card"><header>
+    <div class="mark"><svg width="21" height="21" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c2.5 2.6 3.8 5.7 3.8 9S14.5 18.4 12 21C9.5 18.4 8.2 15.3 8.2 12S9.5 5.6 12 3z"/></svg></div>
+    <div><h1>x70 Studio</h1><p class="sub">High-performance TurboWarp / Scratch pipeline</p></div>
+    <div class="spacer"></div>
+    <span class="tag" id="ver">v0</span>
+    <span class="pill" id="statusPill"><span class="dot" id="statusDot"></span><span id="statusText">connecting</span></span>
+    <button class="iconbtn" id="themeBtn" title="Toggle theme" aria-label="Toggle theme">◐</button>
+  </header></div>
+
+  <div class="tabs" id="tabs">
+    <div class="tab active" data-tab="overview">Overview</div>
+    <div class="tab" data-tab="build">Build</div>
+    <div class="tab" data-tab="library">Library</div>
+    <div class="tab" data-tab="tools">Tools</div>
+    <div class="tab" data-tab="connect">Connect</div>
+  </div>
+
+  <!-- OVERVIEW -->
+  <div class="panel active" data-panel="overview">
+    <div class="card">
+      <div class="grid">
+        <div class="tile"><div class="big" id="cpu">—</div><div class="lbl">CPU</div><div class="bar"><span id="cpuBar"></span></div></div>
+        <div class="tile"><div class="big" id="mem">—</div><div class="lbl">Memory</div><div class="bar"><span id="memBar"></span></div></div>
+        <div class="tile"><div class="big" id="clients">0</div><div class="lbl">connected</div></div>
+        <div class="tile"><div class="big" id="uptime">0s</div><div class="lbl">uptime</div></div>
+        <div class="tile"><div class="big" id="kv" style="font-size:17px">—</div><div class="lbl">cache</div></div>
+        <div class="tile"><div class="big" id="gamesN">0</div><div class="lbl">games</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Performance unlocks</h2>
+      <ul class="chips" id="perfChips"></ul>
+    </div>
+    <div class="card">
+      <h2>Quick start</h2>
+      <div class="row">
+        <button class="btn primary" data-goto="build">⚡ Build a game</button>
+        <button class="btn" data-goto="library">🎮 Open library</button>
+        <button class="btn" data-goto="tools">🛠 Tools & consoles</button>
+        <a class="btn" href="https://turbowarp.org/editor" target="_blank" rel="noopener">Open TurboWarp ↗</a>
+      </div>
+    </div>
+  </div>
+
+  <!-- BUILD -->
+  <div class="panel" data-panel="build">
+    <div class="card">
+      <h2>Build a game</h2>
+      <p class="sub" style="margin-bottom:12px">Drop a Scratch project (<code>.sb3</code>) and it is packaged into a standalone, fully-unlocked game — right here, no terminal. The bridge is baked in and paired to this page.</p>
+      <div class="drop" id="drop">
+        <div style="font-size:30px">⬆️</div>
+        <div><b>Drop an .sb3 / .sb2 here</b> or click to choose</div>
+        <div class="sub" id="dropName"></div>
+      </div>
+      <input type="file" id="file" accept=".sb3,.sb2,.sb" style="display:none">
+      <div class="row" style="margin-top:12px">
+        <button class="btn primary" id="buildBtn" disabled>Build</button>
+        <button class="btn" id="settingsToggle">Engine settings ▾</button>
+      </div>
+      <div id="settings" style="display:none;margin-top:12px">
+        <div class="grid">
+          <label class="opt"><input type="checkbox" data-opt="interpolation"><span>Interpolation (smooth motion)</span></label>
+          <label class="opt"><input type="checkbox" data-opt="infClones"><span>Infinite clones</span></label>
+          <label class="opt"><input type="checkbox" data-opt="noFencing"><span>No sprite fencing</span></label>
+          <label class="opt"><input type="checkbox" data-opt="noMiscLimits"><span>Remove misc limits</span></label>
+          <label class="opt"><input type="checkbox" data-opt="highQualityPen"><span>High-quality pen</span></label>
+          <label class="opt"><input type="checkbox" data-opt="turbo"><span>Turbo mode</span></label>
+          <label class="opt"><span>Framerate</span>
+            <select data-opt="framerate" style="margin-left:auto"><option value="0">Match screen</option><option value="30">30</option><option value="60">60</option><option value="120">120</option><option value="144">144</option></select>
+          </label>
+        </div>
+        <div class="row" style="margin-top:10px"><button class="btn" id="saveSettings">Save settings</button><span class="sub" id="settingsMsg"></span></div>
+      </div>
+      <div id="buildOut" style="margin-top:14px"></div>
+    </div>
+  </div>
+
+  <!-- LIBRARY -->
+  <div class="panel" data-panel="library">
+    <div class="card">
+      <h2>Game library <span class="sub" id="libCount"></span> <button class="btn" id="libRefresh" style="float:right;padding:6px 11px;font-size:12.5px">Refresh</button></h2>
+      <div class="games" id="lib"></div>
+      <p class="empty" id="libEmpty">No builds yet — head to <b>Build</b> and package your first game.</p>
+    </div>
+  </div>
+
+  <!-- TOOLS -->
+  <div class="panel" data-panel="tools">
+    <div class="card">
+      <div class="subtabs" id="toolsub">
+        <div class="subtab active" data-sub="api">API console</div>
+        <div class="subtab" data-sub="sql">Database (SQL)</div>
+        <div class="subtab" data-sub="cache">Cache</div>
+        <div class="subtab" data-sub="files">Files</div>
+      </div>
+
+      <div class="subpanel" data-sub="api">
+        <h3>Call any bridge method</h3>
+        <div class="row" style="margin-bottom:8px"><input id="apiMethod" placeholder="sys.info" style="flex:1;min-width:180px" list="methods"><button class="btn primary" id="apiSend">Send</button></div>
+        <datalist id="methods"></datalist>
+        <textarea id="apiParams" rows="3" placeholder='{ } — params as JSON'>{}</textarea>
+        <pre class="out" id="apiOut" style="margin-top:10px">Result appears here.</pre>
+      </div>
+
+      <div class="subpanel" data-sub="sql" style="display:none">
+        <h3>SQLite console</h3>
+        <textarea id="sqlQ" rows="3">SELECT name FROM sqlite_master WHERE type='table';</textarea>
+        <div class="row" style="margin:8px 0"><button class="btn primary" id="sqlRun">Run query</button><button class="btn" id="sqlExec">Run as statement</button></div>
+        <div id="sqlOut"></div>
+      </div>
+
+      <div class="subpanel" data-sub="cache" style="display:none">
+        <h3>Key / value cache</h3>
+        <div class="row" style="margin-bottom:8px">
+          <input id="ckey" placeholder="key" style="flex:1;min-width:120px">
+          <input id="cval" placeholder="value (for set)" style="flex:2;min-width:140px">
+          <button class="btn" id="cget">Get</button><button class="btn primary" id="cset">Set</button><button class="btn bad" id="cdel">Delete</button>
+        </div>
+        <button class="btn" id="ckeys" style="margin-bottom:8px">List keys</button>
+        <pre class="out" id="cacheOut">—</pre>
+      </div>
+
+      <div class="subpanel" data-sub="files" style="display:none">
+        <h3>File browser <span class="sub">(sandboxed roots)</span></h3>
+        <div class="row" style="margin-bottom:8px">
+          <select id="froot"><option>data</option><option>assets</option></select>
+          <input id="fpath" placeholder="path (blank = root)" style="flex:1;min-width:140px">
+          <button class="btn primary" id="flist">List</button>
+        </div>
+        <div id="filesOut"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CONNECT -->
+  <div class="panel" data-panel="connect">
+    <div class="card">
+      <h2>Connect from TurboWarp</h2>
+      <ol style="padding-left:20px">
+        <li>Open <a class="foot" href="https://turbowarp.org/editor" target="_blank" rel="noopener">turbowarp.org/editor</a>, add a <b>custom extension</b>, keep "Run without sandbox" on.</li>
+        <li>Paste the <b>extension URL</b>, then use the <b>pair with bridge</b> block with the URL and token below.</li>
+        <li>Or just use the <b>Build</b> tab — packaged games come pre-paired.</li>
+      </ol>
+      <div class="row" style="margin-top:4px">
+        <button class="btn primary" id="copyExt">Copy extension URL</button>
+        <button class="btn" id="copyBridge">Copy bridge URL</button>
+        <button class="btn" id="revealTok">Reveal &amp; copy token</button>
+        <a class="btn" href="https://turbowarp.org/editor" target="_blank" rel="noopener">Open TurboWarp ↗</a>
+      </div>
+      <div class="row" id="tokRow" style="display:none;margin-top:10px"><input id="tokInput" readonly style="flex:1;min-width:220px"></div>
+      <p class="warn" id="tokWarn" style="display:none;margin-top:8px">⚠ This token grants access to the bridge. Keep this forwarded port Private.</p>
+    </div>
+  </div>
+
+  <p class="foot">x70 Studio · Live JSON <a id="healthLink" href="#">/health</a> · The token stays hidden until you reveal it.</p>
+</div>
+<div id="toast"></div>
+<script>
+var X70={prefix:"__X70_PREFIX__",version:"__X70_VERSION__"};
+var P=X70.prefix||"";
+function $(s){return document.getElementById(s)}
+function el(t,c,txt){var e=document.createElement(t);if(c)e.className=c;if(txt!=null)e.textContent=txt;return e}
+function fmt(s){s=Math.floor(s||0);return s<60?s+"s":s<3600?Math.floor(s/60)+"m "+(s%60)+"s":Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"m"}
+var toastT;function toast(m){var t=$("toast");t.textContent=m;t.classList.add("show");clearTimeout(toastT);toastT=setTimeout(function(){t.classList.remove("show")},1800)}
+function copy(t){if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t).then(function(){toast("Copied")},function(){prompt("Copy:",t)})}else prompt("Copy:",t)}
+$("ver").textContent="v"+X70.version;$("healthLink").href=P+"/health";
+
+// ---- token + api helpers --------------------------------------------------------------------
+var TOKEN=null;
+function getToken(){if(TOKEN)return Promise.resolve(TOKEN);return fetch(P+"/token",{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){TOKEN=j.token;return TOKEN})}
+function api(method,params){return getToken().then(function(t){return fetch(P+"/rpc",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+t},body:JSON.stringify({method:method,params:params||{}})}).then(function(r){return r.json()})}).then(function(j){if(j&&j.error)throw new Error((j.error.code||"ERR")+": "+j.error.message);return j.result})}
+
+// ---- theme ----------------------------------------------------------------------------------
+var THEMES=["auto","light","dark"],GL={auto:"◐",light:"☀",dark:"☾"},theme="auto";
+try{theme=localStorage.getItem("x70-theme")||"auto"}catch(e){}
+function applyTheme(){if(theme==="auto")delete document.documentElement.dataset.theme;else document.documentElement.dataset.theme=theme;$("themeBtn").textContent=GL[theme];try{localStorage.setItem("x70-theme",theme)}catch(e){}}
+$("themeBtn").onclick=function(){theme=THEMES[(THEMES.indexOf(theme)+1)%3];applyTheme();toast("Theme: "+theme)};applyTheme();
+
+// ---- tabs -----------------------------------------------------------------------------------
+function showTab(name){
+  var ts=document.querySelectorAll(".tab");for(var i=0;i<ts.length;i++)ts[i].classList.toggle("active",ts[i].dataset.tab===name);
+  var ps=document.querySelectorAll(".panel");for(var j=0;j<ps.length;j++)ps[j].classList.toggle("active",ps[j].dataset.panel===name);
+  if(name==="library")loadLibrary();
+  try{location.hash=name}catch(e){}
+}
+document.getElementById("tabs").addEventListener("click",function(e){var t=e.target.closest(".tab");if(t)showTab(t.dataset.tab)});
+document.addEventListener("click",function(e){var g=e.target.closest("[data-goto]");if(g)showTab(g.dataset.goto)});
+if(location.hash)showTab(location.hash.slice(1));
+
+// ---- overview + live stats ------------------------------------------------------------------
+function barColor(v){return v<60?"var(--accent)":v<85?"var(--warn)":"var(--bad)"}
+function setBar(id,v){var b=$(id);b.style.width=Math.max(0,Math.min(100,v))+"%";b.style.background=barColor(v)}
+function online(j){
+  $("statusDot").classList.remove("off");$("statusText").textContent="online";
+  $("cpu").textContent=(j.cpu!=null?j.cpu:0)+"%";setBar("cpuBar",j.cpu||0);
+  $("mem").textContent=(j.mem!=null?j.mem:0)+"%";setBar("memBar",j.mem||0);
+  $("clients").textContent=j.clients;$("uptime").textContent=fmt(j.uptime);$("kv").textContent=j.kv;$("gamesN").textContent=j.games!=null?j.games:0;
+}
+function offline(){$("statusDot").classList.add("off");$("statusText").textContent="offline"}
+function tick(){fetch(P+"/health",{cache:"no-store"}).then(function(r){return r.json()}).then(online).catch(offline)}
+tick();setInterval(tick,3000);
+
+// performance chips from /config
+function loadPerf(){fetch(P+"/config",{cache:"no-store"}).then(function(r){return r.json()}).then(function(c){
+  var r=c.runtime||{};var chips=[
+    ["⚡ Framerate",(r.framerate===0?"match screen":r.framerate)],["Interpolation",r.interpolation?"on":"off"],
+    ["Clones",r.maxClones==="Infinity"||r.maxClones===null?"∞":r.maxClones],["Fencing",r.fencing?"on":"off"],
+    ["Misc limits",r.miscLimits?"on":"off"],["HQ pen",r.highQualityPen?"on":"off"],["Turbo",r.turbo?"on":"off"]];
+  var ul=$("perfChips");ul.innerHTML="";chips.forEach(function(p){var li=el("li");var c=el("span","chip",p[0]+": "+p[1]);li.appendChild(c);ul.appendChild(li)});
+  // reflect into settings controls
+  var b=document.querySelectorAll("[data-opt]");
+  setOpt("interpolation",!!r.interpolation);setOpt("infClones",r.maxClones==="Infinity"||r.maxClones===null);
+  setOpt("noFencing",r.fencing===false);setOpt("noMiscLimits",r.miscLimits===false);
+  setOpt("highQualityPen",!!r.highQualityPen);setOpt("turbo",!!r.turbo);
+  var fr=document.querySelector('[data-opt=framerate]');if(fr)fr.value=String(r.framerate!=null?r.framerate:0);
+}).catch(function(){})}
+function setOpt(k,v){var e=document.querySelector('[data-opt='+k+']');if(e&&e.type==="checkbox")e.checked=v}
+loadPerf();
+
+// ---- build ----------------------------------------------------------------------------------
+var pending=null;
+var drop=$("drop"),fileInput=$("file");
+drop.onclick=function(){fileInput.click()};
+fileInput.onchange=function(){if(fileInput.files[0])setFile(fileInput.files[0])};
+["dragenter","dragover"].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.add("over")})});
+["dragleave","drop"].forEach(function(ev){drop.addEventListener(ev,function(e){e.preventDefault();drop.classList.remove("over")})});
+drop.addEventListener("drop",function(e){if(e.dataTransfer.files[0])setFile(e.dataTransfer.files[0])});
+function setFile(f){if(!/\.(sb3|sb2|sb)$/i.test(f.name)){toast("Pick an .sb3 / .sb2 file");return}pending=f;$("dropName").textContent=f.name+" ("+(f.size/1048576).toFixed(2)+" MB)";$("buildBtn").disabled=false}
+$("settingsToggle").onclick=function(){var s=$("settings");s.style.display=s.style.display==="none"?"block":"none"};
+$("saveSettings").onclick=function(){
+  var r={interpolation:$q("interpolation"),highQualityPen:$q("highQualityPen"),turbo:$q("turbo"),
+    maxClones:$q("infClones")?"Infinity":300,fencing:!$q("noFencing"),miscLimits:!$q("noMiscLimits"),
+    framerate:Number(document.querySelector('[data-opt=framerate]').value)};
+  getToken().then(function(t){return fetch(P+"/config",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+t},body:JSON.stringify({runtime:r})})}).then(function(r){return r.json()}).then(function(j){
+    $("settingsMsg").textContent=j.ok?"Saved ✓":"Error";toast(j.ok?"Settings saved":"Save failed");loadPerf();
+  }).catch(function(){$("settingsMsg").textContent="Error"})};
+function $q(k){var e=document.querySelector('[data-opt='+k+']');return e&&e.checked}
+$("buildBtn").onclick=function(){
+  if(!pending)return;var btn=$("buildBtn");btn.disabled=true;btn.innerHTML='<span class="spin"></span> Building…';
+  $("buildOut").innerHTML='<pre class="out">Packaging '+pending.name+' … this can take a moment.</pre>';
+  getToken().then(function(t){return fetch(P+"/build?name="+encodeURIComponent(pending.name),{method:"POST",headers:{"Authorization":"Bearer "+t,"Content-Type":"application/octet-stream"},body:pending})}).then(function(r){return r.json()}).then(function(j){
+    btn.disabled=false;btn.textContent="Build";
+    if(j.error){$("buildOut").innerHTML='<pre class="out">Build failed:\n'+esc(j.error.message||j.error)+(j.log?"\n\n"+esc(j.log):"")+'</pre>';toast("Build failed");return}
+    var g=j.game;$("buildOut").innerHTML='';
+    var card=el("div","card");card.style.margin="0";
+    card.innerHTML='<h3>✅ Built '+esc(g)+'</h3>';
+    var row=el("div","row");
+    var play=el("a","btn primary","▶ Play");play.href=P+"/play/"+encodeURIComponent(g);play.target="_blank";play.rel="noopener";
+    var dl=el("a","btn","Download");dl.href=P+"/download/"+encodeURIComponent(g);
+    var lib=el("button","btn","Open library");lib.onclick=function(){showTab("library")};
+    row.appendChild(play);row.appendChild(dl);row.appendChild(lib);card.appendChild(row);
+    $("buildOut").appendChild(card);toast("Build complete");tick();
+  }).catch(function(e){btn.disabled=false;btn.textContent="Build";$("buildOut").innerHTML='<pre class="out">Build error: '+esc(e.message)+'</pre>'})};
+function esc(s){return String(s).replace(/[&<>]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;"}[c]})}
+
+// ---- library --------------------------------------------------------------------------------
+function loadLibrary(){fetch(P+"/games",{cache:"no-store"}).then(function(r){return r.json()}).then(function(j){renderLib(j.builds||[])}).catch(function(){renderLib([])})}
+$("libRefresh").onclick=loadLibrary;
+function renderLib(list){
+  var g=$("lib");g.innerHTML="";$("libCount").textContent="("+list.length+")";
+  $("libEmpty").style.display=list.length?"none":"";
+  list.forEach(function(f){
+    var name=f.replace(/\.html$/,"");
+    var card=el("div","game");
+    var th=el("div","thumb","🎮");card.appendChild(th);
+    var body=el("div","body");var nm=el("div","name",name);nm.title=name;body.appendChild(nm);
+    var acts=el("div","acts");
+    var play=el("a","btn primary","▶ Play");play.href=P+"/play/"+encodeURIComponent(f);play.target="_blank";play.rel="noopener";
+    var dl=el("a","btn","⬇");dl.title="Download";dl.href=P+"/download/"+encodeURIComponent(f);
+    var cp=el("button","btn","🔗");cp.title="Copy link";cp.onclick=function(){copy(location.origin+P+"/play/"+encodeURIComponent(f))};
+    var del=el("button","btn bad","🗑");del.title="Delete";del.onclick=function(){if(!confirm("Delete "+f+"?"))return;getToken().then(function(t){return fetch(P+"/games/delete",{method:"POST",headers:{"Content-Type":"application/json","Authorization":"Bearer "+t},body:JSON.stringify({name:f})})}).then(function(r){return r.json()}).then(function(j){toast(j.ok?"Deleted":"Error");loadLibrary();tick()})};
+    acts.appendChild(play);acts.appendChild(dl);acts.appendChild(cp);acts.appendChild(del);body.appendChild(acts);card.appendChild(body);g.appendChild(card);
+  });
+}
+
+// ---- tools: subtabs -------------------------------------------------------------------------
+$("toolsub").addEventListener("click",function(e){var s=e.target.closest(".subtab");if(!s)return;
+  var subs=document.querySelectorAll(".subtab");for(var i=0;i<subs.length;i++)subs[i].classList.toggle("active",subs[i]===s);
+  var ps=document.querySelectorAll(".subpanel");for(var j=0;j<ps.length;j++)ps[j].style.display=ps[j].dataset.sub===s.dataset.sub?"block":"none";
+});
+// api console
+var METHODS=["sys.info","sys.metrics","sys.ping","kv.get","kv.set","kv.keys","list.range","hash.all","sql.query","sql.run","fs.list","fs.read","fs.stat","assets.list","exec.run"];
+var dl=$("methods");METHODS.forEach(function(m){var o=el("option");o.value=m;dl.appendChild(o)});
+$("apiSend").onclick=function(){var m=$("apiMethod").value.trim();var p={};try{p=JSON.parse($("apiParams").value||"{}")}catch(e){$("apiOut").textContent="Params are not valid JSON";return}
+  $("apiOut").textContent="…";api(m,p).then(function(r){$("apiOut").textContent=JSON.stringify(r,null,2)}).catch(function(e){$("apiOut").textContent=e.message})};
+// sql console
+function sqlRun(stmt){var q=$("sqlQ").value;$("sqlOut").innerHTML='<span class="mut">running…</span>';
+  api(stmt?"sql.exec":"sql.query",{sql:q}).then(function(r){
+    if(stmt){$("sqlOut").innerHTML='<span class="mut">OK</span>';return}
+    if(!r||!r.length){$("sqlOut").innerHTML='<span class="mut">0 rows</span>';return}
+    var cols=Object.keys(r[0]);var t=el("table");var tr=el("tr");cols.forEach(function(c){tr.appendChild(el("th",null,c))});var thead=el("thead");thead.appendChild(tr);t.appendChild(thead);
+    var tb=el("tbody");r.forEach(function(row){var tr=el("tr");cols.forEach(function(c){tr.appendChild(el("td",null,row[c]==null?"":String(row[c])))});tb.appendChild(tr)});t.appendChild(tb);
+    var w=el("div","tscroll");w.appendChild(t);$("sqlOut").innerHTML="";$("sqlOut").appendChild(w);
+  }).catch(function(e){$("sqlOut").innerHTML='<pre class="out">'+esc(e.message)+'</pre>'})}
+$("sqlRun").onclick=function(){sqlRun(false)};$("sqlExec").onclick=function(){sqlRun(true)};
+// cache
+$("cget").onclick=function(){api("kv.get",{key:$("ckey").value}).then(function(r){$("cacheOut").textContent=r==null?"(nil)":r}).catch(function(e){$("cacheOut").textContent=e.message})};
+$("cset").onclick=function(){api("kv.set",{key:$("ckey").value,value:$("cval").value}).then(function(){$("cacheOut").textContent="OK";toast("Set")}).catch(function(e){$("cacheOut").textContent=e.message})};
+$("cdel").onclick=function(){api("kv.del",{key:$("ckey").value}).then(function(){$("cacheOut").textContent="Deleted";toast("Deleted")}).catch(function(e){$("cacheOut").textContent=e.message})};
+$("ckeys").onclick=function(){api("kv.keys",{pattern:"*"}).then(function(r){$("cacheOut").textContent=(r&&r.length)?r.join("\n"):"(no keys)"}).catch(function(e){$("cacheOut").textContent=e.message})};
+// files
+$("flist").onclick=function(){var root=$("froot").value,path=$("fpath").value;
+  api("fs.list",{root:root,path:path}).then(function(r){
+    var out=$("filesOut");out.innerHTML="";if(!r.length){out.innerHTML='<span class="mut">empty</span>';return}
+    var ul=el("div");ul.style.display="flex";ul.style.flexDirection="column";ul.style.gap="4px";
+    r.forEach(function(name){var rowd=el("div","row");rowd.style.alignItems="center";
+      var isDir=/\/$/.test(name);var lab=el("code",null,name);lab.style.flex="1";rowd.appendChild(lab);
+      if(isDir){var open=el("button","btn","Open");open.style.padding="5px 10px";open.onclick=function(){$("fpath").value=(path?path.replace(/\/$/,"")+"/":"")+name.replace(/\/$/,"");$("flist").click()};rowd.appendChild(open)}
+      else{var view=el("button","btn","View");view.style.padding="5px 10px";view.onclick=function(){api("fs.read",{root:root,path:(path?path.replace(/\/$/,"")+"/":"")+name}).then(function(c){var pre=el("pre","out",c);out.insertBefore(pre,out.firstChild)}).catch(function(e){toast(e.message)})};rowd.appendChild(view);
+        var del=el("button","btn bad","Delete");del.style.padding="5px 10px";del.onclick=function(){if(!confirm("Delete "+name+"?"))return;api("fs.delete",{root:root,path:(path?path.replace(/\/$/,"")+"/":"")+name}).then(function(){toast("Deleted");$("flist").click()})};rowd.appendChild(del)}
+      ul.appendChild(rowd)});
+    out.appendChild(ul);
+  }).catch(function(e){$("filesOut").innerHTML='<pre class="out">'+esc(e.message)+'</pre>'})};
+
+// ---- connect --------------------------------------------------------------------------------
+var BASE=location.origin+P;
+$("copyExt").onclick=function(){copy(BASE+"/extension.js")};
+$("copyBridge").onclick=function(){copy(BASE)};
+$("revealTok").onclick=function(){getToken().then(function(t){$("tokInput").value=t;$("tokRow").style.display="flex";$("tokWarn").style.display="block";copy(t)})};
+</script></body></html>
