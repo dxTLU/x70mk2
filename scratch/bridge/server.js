@@ -148,7 +148,7 @@ async function start(config = load(), { log = console.log } = {}) {
     const base = `${proto}://${host}${prefix}`;
     const builds = listBuilds();
     const buildsHtml = builds.length
-      ? `<ul>${builds.map((f) => `<li><code>scratch/dist/${esc(f)}</code></li>`).join('')}</ul>`
+      ? `<ul>${builds.map((f) => `<li><a href="${prefix}/play/${encodeURIComponent(f)}" target="_blank" rel="noopener">&#9654; ${esc(f.replace(/\.html$/, ''))}</a> <span class="mut">(scratch/dist/${esc(f)})</span></li>`).join('')}</ul>`
       : '<p class="mut">No builds yet — run <code>npm run build</code> and they appear here.</p>';
     return `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>x70 Bridge</title>
@@ -219,6 +219,21 @@ tick();setInterval(tick,3000);
       }
       if (req.method === 'GET' && url.pathname === '/extension.js') {
         return send(res, 200, fs.readFileSync(EXTENSION_FILE), { ...cors, 'Content-Type': 'text/javascript; charset=utf-8' });
+      }
+      if (req.method === 'GET' && url.pathname === '/games') {
+        return send(res, 200, { builds: listBuilds() }, cors);
+      }
+      if (req.method === 'GET' && url.pathname.startsWith('/play/')) {
+        // Serve a packaged game so it can be played straight from the port. A game that uses the
+        // x70 Bridge blocks carries the baked token, so keep a forwarded port Private to share.
+        const name = decodeURIComponent(url.pathname.slice('/play/'.length));
+        if (!/^[A-Za-z0-9._-]+\.html$/.test(name) || !listBuilds().includes(name)) {
+          return send(res, 404, 'No such game', cors);
+        }
+        const file = path.join(config.build.outDir, name);
+        const data = await fs.promises.readFile(file).catch(() => null);
+        if (!data) return send(res, 404, 'No such game', cors);
+        return send(res, 200, data, { ...cors, 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       }
       if (!tokenOk(reqToken(req, url), b.token)) return send(res, 401, 'Missing or wrong bridge token', cors);
 
