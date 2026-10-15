@@ -25,6 +25,10 @@ const { Sql } = require('./sql');
 const rpc = require('./rpc');
 const { BridgeError, resolveIn } = require('./sandbox');
 
+let VERSION = '0.0.0';
+try { VERSION = require('../package.json').version || VERSION; } catch { /* no package.json */ }
+const STARTED_AT = Date.now();
+
 const MIME = {
   '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp',
   '.avif': 'image/avif', '.bmp': 'image/bmp', '.svg': 'image/svg+xml', '.wav': 'audio/wav', '.mp3': 'audio/mpeg',
@@ -109,14 +113,88 @@ async function start(config = load(), { log = console.log } = {}) {
   };
 
   const readBody = (req, limit) => new Promise((resolve, reject) => {
-    const parts = []; let n = 0;
+    const parts = []; let n = 0; let over = false;
+    const tooBig = () => reject(new BridgeError('ETOOBIG', 'Request body too large'));
     req.on('data', (d) => {
       n += d.length;
-      if (n > limit) { reject(new BridgeError('ETOOBIG', 'Request body too large')); req.destroy(); } else parts.push(d);
+      if (n > limit) {
+        over = true;
+        // Stop buffering, but drain the rest so the handler can still send a clean 413 response.
+        // Only a pathologically huge body (an attack, not a big save) is force-closed.
+        if (n > limit * 4 + 65536) { tooBig(); req.destroy(); }
+      } else {
+        parts.push(d);
+      }
     });
-    req.on('end', () => resolve(Buffer.concat(parts).toString('utf8')));
+    req.on('end', () => (over ? tooBig() : resolve(Buffer.concat(parts).toString('utf8'))));
+    req.on('aborted', tooBig);
     req.on('error', reject);
   });
+
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const listBuilds = () => {
+    try { return fs.readdirSync(config.build.outDir).filter((f) => f.endsWith('.html')).sort(); }
+    catch { return []; }
+  };
+  // A token-free status page at GET / so opening the forwarded-port URL shows "it works", the
+  // version, the built games, and the connection steps — never the token. Stats refresh live from
+  // /health so it is visibly a running Node page. The extension URL is built from the request host.
+  const landingPage = (req) => {
+    const host = esc(String(req.headers.host || `127.0.0.1:${boundPort}`));
+    const proto = req.headers['x-forwarded-proto'] || (/^(127\.0\.0\.1|localhost|\[::1\])/.test(host) ? 'http' : 'https');
+    // When reverse-proxied under a path (e.g. /x70), the mount sends x-forwarded-prefix so the
+    // page's own URLs resolve correctly; empty when the bridge is hit directly.
+    const prefix = esc(String(req.headers['x-forwarded-prefix'] || '').replace(/\/$/, ''));
+    const base = `${proto}://${host}${prefix}`;
+    const builds = listBuilds();
+    const buildsHtml = builds.length
+      ? `<ul>${builds.map((f) => `<li><a href="${prefix}/play/${encodeURIComponent(f)}" target="_blank" rel="noopener">&#9654; ${esc(f.replace(/\.html$/, ''))}</a> <span class="mut">(scratch/dist/${esc(f)})</span></li>`).join('')}</ul>`
+      : '<p class="mut">No builds yet — run <code>npm run build</code> and they appear here.</p>';
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>x70 Bridge</title>
+<style>:root{color-scheme:light dark;--bg:#f6f8fa;--fg:#1f2328;--mut:#656d76;--card:#fff;--line:#d0d7de;--ok:#1a7f37;--bad:#cf222e;--accent:#1f6feb}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#8b949e;--card:#161b22;--line:#30363d;--ok:#3fb950;--bad:#f85149;--accent:#4493f8}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;padding:24px}
+.card{max-width:700px;margin:0 auto 16px;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px}
+h1{font-size:20px;margin:0 0 4px;display:flex;align-items:center;gap:10px}h2{font-size:15px;margin:20px 0 8px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--ok) 20%,transparent);transition:background .3s}
+.dot.off{background:var(--bad);box-shadow:0 0 0 4px color-mix(in srgb,var(--bad) 20%,transparent)}
+.sub{color:var(--mut);margin:0}.mut{color:var(--mut)}.tag{font:12px ui-monospace,Menlo,monospace;color:var(--mut);border:1px solid var(--line);border-radius:999px;padding:1px 8px;margin-left:6px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(110px,1fr));gap:12px;margin:18px 0}
+.stat{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.stat b{display:block;font-size:18px}.stat span{color:var(--mut);font-size:12px}
+ol{padding-left:20px}ul{padding-left:20px}li{margin:3px 0}
+code{background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:1px 6px;font:13px ui-monospace,Menlo,monospace;word-break:break-all}
+a{color:var(--accent)}.foot{color:var(--mut);font-size:12px;margin-top:4px}</style></head>
+<body><div class="card">
+<h1><span class="dot" id="dot"></span><span id="state">x70 Bridge is running</span><span class="tag">v${esc(VERSION)}</span></h1>
+<p class="sub">Local daemon for high-performance TurboWarp / Scratch projects.</p>
+<div class="grid">
+<div class="stat"><b id="kv">${esc(kv.kind)}</b><span>cache</span></div>
+<div class="stat"><b id="clients">${clients.size}</b><span>connected</span></div>
+<div class="stat"><b id="uptime">0s</b><span>uptime</span></div>
+<div class="stat"><b>${esc(process.platform)}</b><span>${esc(process.version)}</span></div>
+</div>
+<h2>Connect from TurboWarp</h2>
+<ol>
+<li>Add a custom extension from <code>${base}/extension.js</code> (keep "Run without sandbox" on).</li>
+<li>Use the <b>pair with bridge</b> block once with <code>${base}</code> and your token from <code>scratch/data/bridge.token</code>.</li>
+<li>Build standalone games with <code>npm run build</code> — the bridge is baked in.</li>
+</ol>
+<h2>Built games (${builds.length})</h2>
+${buildsHtml}
+<p class="foot">Live JSON: <a href="${prefix}/health">${prefix}/health</a> · Extension: <a href="${prefix}/extension.js">${prefix}/extension.js</a> · This page never shows your token.</p>
+</div>
+<script>
+const fmt=s=>{s=Math.floor(s);return s<60?s+"s":s<3600?Math.floor(s/60)+"m "+(s%60)+"s":Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"m"};
+async function tick(){try{const r=await fetch("${prefix}/health",{cache:"no-store"});const j=await r.json();
+document.getElementById("kv").textContent=j.kv;document.getElementById("clients").textContent=j.clients;
+document.getElementById("uptime").textContent=fmt(j.uptime||0);
+document.getElementById("dot").classList.remove("off");document.getElementById("state").textContent="x70 Bridge is running";
+}catch(e){document.getElementById("dot").classList.add("off");document.getElementById("state").textContent="bridge unreachable";}}
+tick();setInterval(tick,3000);
+</script></body></html>`;
+  };
 
   const server = http.createServer(async (req, res) => {
     let url;
@@ -133,11 +211,29 @@ async function start(config = load(), { log = console.log } = {}) {
     if (origin && !originOk(origin)) return send(res, 403, `Origin ${origin} is not in bridge.allowedOrigins`);
 
     try {
+      if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/status')) {
+        return send(res, 200, landingPage(req), { ...cors, 'Content-Type': 'text/html; charset=utf-8' });
+      }
       if (req.method === 'GET' && url.pathname === '/health') {
-        return send(res, 200, { ok: true, kv: kv.kind, clients: clients.size }, cors);
+        return send(res, 200, { ok: true, version: VERSION, kv: kv.kind, clients: clients.size, platform: process.platform, node: process.version, uptime: (Date.now() - STARTED_AT) / 1000 }, cors);
       }
       if (req.method === 'GET' && url.pathname === '/extension.js') {
         return send(res, 200, fs.readFileSync(EXTENSION_FILE), { ...cors, 'Content-Type': 'text/javascript; charset=utf-8' });
+      }
+      if (req.method === 'GET' && url.pathname === '/games') {
+        return send(res, 200, { builds: listBuilds() }, cors);
+      }
+      if (req.method === 'GET' && url.pathname.startsWith('/play/')) {
+        // Serve a packaged game so it can be played straight from the port. A game that uses the
+        // x70 Bridge blocks carries the baked token, so keep a forwarded port Private to share.
+        const name = decodeURIComponent(url.pathname.slice('/play/'.length));
+        if (!/^[A-Za-z0-9._-]+\.html$/.test(name) || !listBuilds().includes(name)) {
+          return send(res, 404, 'No such game', cors);
+        }
+        const file = path.join(config.build.outDir, name);
+        const data = await fs.promises.readFile(file).catch(() => null);
+        if (!data) return send(res, 404, 'No such game', cors);
+        return send(res, 200, data, { ...cors, 'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store' });
       }
       if (!tokenOk(reqToken(req, url), b.token)) return send(res, 401, 'Missing or wrong bridge token', cors);
 
@@ -166,7 +262,8 @@ async function start(config = load(), { log = console.log } = {}) {
       }
       return send(res, 404, 'Not found', cors);
     } catch (e) {
-      return send(res, e instanceof SyntaxError ? 400 : 500, { error: errorPayload(e) }, cors);
+      const status = e instanceof SyntaxError ? 400 : (e && e.code === 'ETOOBIG') ? 413 : 500;
+      return send(res, status, { error: errorPayload(e) }, cors);
     }
   });
 
@@ -214,7 +311,19 @@ async function start(config = load(), { log = console.log } = {}) {
   const port = boundPort = server.address().port;
   log(`[bridge] listening on http://${b.host}:${port}  (token file: ${b.tokenFile})`);
 
+  // Heartbeat: ping each client periodically so a forwarded port (Codespaces/tunnel) does not drop
+  // the connection as idle during a long session, and so dead peers are reaped instead of leaking.
+  const heartbeat = setInterval(() => {
+    for (const c of clients) {
+      if (!c.authed) continue;
+      if (c.isAlive === false) { c.close(4000, 'ping timeout'); continue; }
+      c.ping();
+    }
+  }, 30000);
+  if (heartbeat.unref) heartbeat.unref();
+
   const close = () => new Promise((resolve) => {
+    clearInterval(heartbeat);
     for (const c of clients) c.close(1001, 'shutting down');
     server.close(() => { try { sql.close(); } catch { /* already closed */ } kv.store.close(); resolve(); });
     server.closeAllConnections();

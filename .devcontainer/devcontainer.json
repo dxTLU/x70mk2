@@ -1,12 +1,17 @@
 {
-  "name": "userx70 host server",
+  "name": "userx70 host server + x70 Scratch bridge",
   "image": "mcr.microsoft.com/devcontainers/javascript-node:22",
-  "forwardPorts": [8080],
+  "forwardPorts": [8000, 7070],
   "portsAttributes": {
-    "8080": {
+    "8000": {
       "label": "userx70 host server",
       "onAutoForward": "openPreview"
+    },
+    "7070": {
+      "label": "x70 Scratch bridge",
+      "onAutoForward": "notify"
     }
   },
-  "postAttachCommand": "bash -lc 'curl -sf http://localhost:8080/__proxy/health >/dev/null 2>&1 || (nohup node server.js >/tmp/userx70.log 2>&1 &); sleep 1; echo \"userx70 host server is running on port 8080 — open the forwarded URL\"'"
+  "onCreateCommand": "bash -lc 'cd scratch && npm install --no-audit --no-fund'",
+  "postAttachCommand": "bash -lc 'curl -sf http://localhost:8000/__proxy/health >/dev/null 2>&1 || (nohup npm start >/tmp/x70.log 2>&1 &); sleep 2; echo \"Open port 8000 (userx70 host server) — it shows the x70 Scratch pipeline panel; the bridge is on port 7070.\"'"
 }

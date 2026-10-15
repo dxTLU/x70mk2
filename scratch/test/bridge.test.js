@@ -127,6 +127,46 @@ test('insertMany rejects a bad identifier', () => withBridge(async ({ call }) =>
   assert.equal(r.body.error.code, 'ESQL');
 }));
 
+test('games listing and play serving work without a token; unknown/unsafe names 404', () => withBridge(async ({ bridge, config }) => {
+  const fs = require('fs');
+  const path = require('path');
+  fs.mkdirSync(config.build.outDir, { recursive: true });
+  fs.writeFileSync(path.join(config.build.outDir, 'demo.html'), '<!doctype html><title>demo</title>hi');
+  const req = (p) => new Promise((resolve, reject) => {
+    const r = http.request({ host: '127.0.0.1', port: bridge.port, path: p, method: 'GET',
+      headers: { Host: `127.0.0.1:${bridge.port}`, Connection: 'close' }, agent: false },
+      (resp) => { let d = ''; resp.on('data', (c) => (d += c)); resp.on('end', () => resolve({ status: resp.statusCode, type: resp.headers['content-type'], body: d })); });
+    r.on('error', reject); r.end();
+  });
+  const list = await req('/games');
+  assert.equal(list.status, 200);
+  assert.deepEqual(JSON.parse(list.body).builds, ['demo.html']);
+  const play = await req('/play/demo.html');
+  assert.equal(play.status, 200);
+  assert.match(play.type, /text\/html/);
+  assert.match(play.body, /demo/);
+  assert.equal((await req('/play/missing.html')).status, 404);
+  assert.equal((await req('/play/..%2f..%2fsecret')).status, 404);
+}));
+
+test('the root status page is served without a token and never leaks it', () => withBridge(async ({ bridge, config }) => {
+  const res = await new Promise((resolve, reject) => {
+    const r = http.request({ host: '127.0.0.1', port: bridge.port, path: '/', method: 'GET',
+      headers: { Host: `127.0.0.1:${bridge.port}`, Connection: 'close' }, agent: false },
+      (resp) => { let d = ''; resp.on('data', (c) => (d += c)); resp.on('end', () => resolve({ status: resp.statusCode, type: resp.headers['content-type'], body: d })); });
+    r.on('error', reject); r.end();
+  });
+  assert.equal(res.status, 200);
+  assert.match(res.type, /text\/html/);
+  assert.match(res.body, /x70 Bridge is running/);
+  assert.ok(!res.body.includes(config.bridge.token), 'status page must not contain the token');
+}));
+
+test('an over-sized request body is refused with 413', () => withBridge(async ({ call }) => {
+  const r = await call('kv.set', { key: 'x', value: 'y'.repeat(2 * 1024 * 1024) }); // > maxFileBytes*1.4
+  assert.equal(r.status, 413);
+}));
+
 test('system metrics report numbers', () => withBridge(async ({ call }) => {
   const m = (await call('sys.metrics')).body.result;
   assert.equal(typeof m.cpuPercent, 'number');

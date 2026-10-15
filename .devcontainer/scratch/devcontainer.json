@@ -4,18 +4,22 @@
   "features": {
     "ghcr.io/itsmechlark/features/redis-server:1": {}
   },
-  "forwardPorts": [7070],
+  "forwardPorts": [
+    7070
+  ],
   "portsAttributes": {
     "7070": {
       "label": "x70 Scratch bridge",
-      "onAutoForward": "notify"
+      "onAutoForward": "openPreview"
     }
   },
   "onCreateCommand": "bash -lc 'cd scratch && npm install --no-audit --no-fund'",
   "postStartCommand": "bash -lc 'scratch/scripts/codespace-start.sh'",
   "customizations": {
     "vscode": {
-      "extensions": ["dbaeumer.vscode-eslint"]
+      "extensions": [
+        "dbaeumer.vscode-eslint"
+      ]
     }
   }
 }

@@ -9,7 +9,8 @@
     "node": ">=18"
   },
   "scripts": {
-    "start": "node --max-http-header-size=65536 server.js",
+    "start": "node --max-http-header-size=65536 scripts/serve-all.js",
+    "start:proxy": "node --max-http-header-size=65536 server.js",
     "start:varnish": "bash scripts/start.sh",
     "start:node": "bash scripts/start-node-only.sh",
     "stop": "bash scripts/stop.sh",

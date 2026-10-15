@@ -64,6 +64,14 @@ shows the same unlocked settings.
 Not in Codespaces? Run it on any Linux/macOS machine or WSL the same way: `npm install`,
 `npm run setup`, `npm run bridge`.
 
+### One port: `npm start`
+
+From the **repo root**, `npm start` serves everything on a single port (default **8000**): the proxy
+home page, plus the bridge mounted at **`/x70/`** on the same origin. So the bridge status page is
+`http://localhost:8000/x70/`, the extension URL is `http://localhost:8000/x70/extension.js`, and the
+home page shows a live Scratch-pipeline panel. The bridge also still listens directly on `7070`.
+Use `npm run start:proxy` for the proxy alone.
+
 ## Scripts
 
 | Command | What it does |
