@@ -127,6 +127,19 @@ test('insertMany rejects a bad identifier', () => withBridge(async ({ call }) =>
   assert.equal(r.body.error.code, 'ESQL');
 }));
 
+test('the root status page is served without a token and never leaks it', () => withBridge(async ({ bridge, config }) => {
+  const res = await new Promise((resolve, reject) => {
+    const r = http.request({ host: '127.0.0.1', port: bridge.port, path: '/', method: 'GET',
+      headers: { Host: `127.0.0.1:${bridge.port}`, Connection: 'close' }, agent: false },
+      (resp) => { let d = ''; resp.on('data', (c) => (d += c)); resp.on('end', () => resolve({ status: resp.statusCode, type: resp.headers['content-type'], body: d })); });
+    r.on('error', reject); r.end();
+  });
+  assert.equal(res.status, 200);
+  assert.match(res.type, /text\/html/);
+  assert.match(res.body, /x70 Bridge is running/);
+  assert.ok(!res.body.includes(config.bridge.token), 'status page must not contain the token');
+}));
+
 test('an over-sized request body is refused with 413', () => withBridge(async ({ call }) => {
   const r = await call('kv.set', { key: 'x', value: 'y'.repeat(2 * 1024 * 1024) }); // > maxFileBytes*1.4
   assert.equal(r.status, 413);

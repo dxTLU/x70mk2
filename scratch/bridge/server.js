@@ -127,6 +127,45 @@ async function start(config = load(), { log = console.log } = {}) {
     req.on('error', reject);
   });
 
+  const esc = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  // A token-free status page at GET / so opening the forwarded-port URL shows "it works" plus the
+  // connection steps — never the token. The extension URL is built from the request's own host.
+  const landingPage = (req) => {
+    const host = esc(String(req.headers.host || `127.0.0.1:${boundPort}`));
+    const proto = req.headers['x-forwarded-proto'] || (/^(127\.0\.0\.1|localhost|\[::1\])/.test(host) ? 'http' : 'https');
+    const base = `${proto}://${host}`;
+    return `<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>x70 Bridge</title>
+<style>:root{color-scheme:light dark;--bg:#f6f8fa;--fg:#1f2328;--mut:#656d76;--card:#fff;--line:#d0d7de;--ok:#1a7f37;--accent:#1f6feb}
+@media(prefers-color-scheme:dark){:root{--bg:#0d1117;--fg:#e6edf3;--mut:#8b949e;--card:#161b22;--line:#30363d;--ok:#3fb950;--accent:#4493f8}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",system-ui,sans-serif;padding:24px}
+.card{max-width:680px;margin:0 auto;background:var(--card);border:1px solid var(--line);border-radius:12px;padding:24px}
+h1{font-size:20px;margin:0 0 4px;display:flex;align-items:center;gap:10px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px color-mix(in srgb,var(--ok) 20%,transparent)}
+.sub{color:var(--mut);margin:0 0 20px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:12px;margin:16px 0}
+.stat{background:var(--bg);border:1px solid var(--line);border-radius:8px;padding:10px 12px}
+.stat b{display:block;font-size:18px}.stat span{color:var(--mut);font-size:12px}
+ol{padding-left:20px}code{background:var(--bg);border:1px solid var(--line);border-radius:5px;padding:1px 6px;font-size:13px;word-break:break-all}
+a{color:var(--accent)}.foot{color:var(--mut);font-size:12px;margin-top:20px}</style></head>
+<body><div class="card">
+<h1><span class="dot"></span>x70 Bridge is running</h1>
+<p class="sub">Local daemon for high-performance TurboWarp / Scratch projects.</p>
+<div class="grid">
+<div class="stat"><b>${esc(kv.kind)}</b><span>cache</span></div>
+<div class="stat"><b>${clients.size}</b><span>connected</span></div>
+<div class="stat"><b>${esc(process.platform)}</b><span>platform</span></div>
+<div class="stat"><b>${esc(process.version)}</b><span>node</span></div>
+</div>
+<ol>
+<li>In the TurboWarp editor: add a custom extension from <code>${base}/extension.js</code> (keep "Run without sandbox" on).</li>
+<li>Use the <b>pair with bridge</b> block once with <code>${base}</code> and your token from <code>scratch/data/bridge.token</code>.</li>
+<li>Build standalone games with <code>npm run build</code> — the bridge is baked in.</li>
+</ol>
+<p class="foot">Health: <a href="/health">/health</a> · Extension: <a href="/extension.js">/extension.js</a> · This page never shows your token.</p>
+</div></body></html>`;
+  };
+
   const server = http.createServer(async (req, res) => {
     let url;
     try { url = new URL(req.url, 'http://bridge'); } catch { return send(res, 400, 'Bad URL'); }
@@ -142,8 +181,11 @@ async function start(config = load(), { log = console.log } = {}) {
     if (origin && !originOk(origin)) return send(res, 403, `Origin ${origin} is not in bridge.allowedOrigins`);
 
     try {
+      if (req.method === 'GET' && (url.pathname === '/' || url.pathname === '/status')) {
+        return send(res, 200, landingPage(req), { ...cors, 'Content-Type': 'text/html; charset=utf-8' });
+      }
       if (req.method === 'GET' && url.pathname === '/health') {
-        return send(res, 200, { ok: true, kv: kv.kind, clients: clients.size }, cors);
+        return send(res, 200, { ok: true, kv: kv.kind, clients: clients.size, platform: process.platform, node: process.version }, cors);
       }
       if (req.method === 'GET' && url.pathname === '/extension.js') {
         return send(res, 200, fs.readFileSync(EXTENSION_FILE), { ...cors, 'Content-Type': 'text/javascript; charset=utf-8' });
