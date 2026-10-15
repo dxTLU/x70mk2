@@ -170,6 +170,14 @@
     <button class="link-btn" id="clear-cookies" type="button">Sign out everywhere (clear proxied cookies)</button>
   </section>
 
+  <section aria-labelledby="x70-title" id="x70-section">
+    <h2 id="x70-title">x70 Scratch pipeline
+      <span id="x70-dot" title="checking…" style="display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--muted);vertical-align:middle;margin-left:6px"></span>
+    </h2>
+    <p class="sub" id="x70-status">Checking the local TurboWarp bridge…</p>
+    <ul class="chips" id="x70-links"></ul>
+  </section>
+
   <footer>
     <p>Pages are fetched by this server and rewritten so every link, image, script and request stays inside the proxy. Direct links work too: <code>/p/https://example.com/</code></p>
     <p>Press <kbd>/</kbd> to jump to the address box. The floating button on proxied pages brings you back here.</p>
@@ -477,6 +485,37 @@
     status('Opening ' + labelFor(u) + '…');
     open(u);
   });
+
+  // x70 Scratch pipeline: show the local bridge's live status and links on this page. The bridge
+  // runs on port 7070; in Codespaces that is a sibling forwarded host (<name>-7070.<domain>).
+  (function () {
+    var host = location.host, m = host.match(/^(.*)-8000\.(.+)$/);
+    var base = m ? ('https://' + m[1] + '-7070.' + m[2]) : (location.protocol + '//' + location.hostname + ':7070');
+    var dot = $('x70-dot'), statusEl = $('x70-status'), links = $('x70-links');
+    if (!dot) return;
+    function chip(label, href) {
+      var li = document.createElement('li'), a = document.createElement('a');
+      a.className = 'chip'; a.href = href; a.target = '_blank'; a.rel = 'noopener'; a.textContent = label;
+      li.appendChild(a); return li;
+    }
+    function up(j) {
+      dot.style.background = 'var(--accent)'; dot.title = 'online';
+      statusEl.textContent = 'Bridge online — cache: ' + j.kv + ', ' + j.clients + ' connected · v' + (j.version || '?') +
+        '. Build standalone games with "npm run build".';
+      links.textContent = '';
+      links.appendChild(chip('Open bridge ↗', base + '/'));
+      links.appendChild(chip('Extension URL', base + '/extension.js'));
+      links.appendChild(chip('Health JSON', base + '/health'));
+    }
+    function down() {
+      dot.style.background = 'var(--danger)'; dot.title = 'offline';
+      statusEl.innerHTML = 'Bridge not running. Start everything with <code>npm start</code> ' +
+        '(serves this page on 8000 and the TurboWarp bridge on 7070).';
+      links.textContent = '';
+    }
+    function tick() { fetch(base + '/health', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(up).catch(down); }
+    tick(); setInterval(tick, 4000);
+  })();
 
   // Links on this page: remember them (middle-click and new tabs included).
   document.addEventListener('click', function (e) {
