@@ -489,8 +489,8 @@
   // x70 Scratch pipeline: show the local bridge's live status and links on this page. The bridge
   // runs on port 7070; in Codespaces that is a sibling forwarded host (<name>-7070.<domain>).
   (function () {
-    var host = location.host, m = host.match(/^(.*)-8000\.(.+)$/);
-    var base = m ? ('https://' + m[1] + '-7070.' + m[2]) : (location.protocol + '//' + location.hostname + ':7070');
+    // The bridge is mounted same-origin at /x70 by `npm start`, so no cross-origin fetch needed.
+    var base = '/x70';
     var dot = $('x70-dot'), statusEl = $('x70-status'), links = $('x70-links');
     if (!dot) return;
     function chip(label, href) {

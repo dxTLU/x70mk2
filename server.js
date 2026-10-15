@@ -9,8 +9,16 @@ const proxy = require('./src/proxy');
 const { handleUpgrade } = require('./src/websocket');
 const upstream = require('./src/upstream');
 
+// Optional reverse-proxy mount (set by serve-all.js) that handles a path prefix such as /x70/
+// before the proxy's own routing. Null for a plain proxy, so default behaviour is unchanged.
+let mount = null;
+function setMount(m) { mount = m; }
+
 function createServer() {
-  const handler = (req, res) => proxy.handle(req, res);
+  const handler = (req, res) => {
+    if (mount && req.url && mount.matches(req.url)) return mount.http(req, res);
+    return proxy.handle(req, res);
+  };
   const server = config.tlsCert && config.tlsKey
     ? https.createServer({ cert: fs.readFileSync(config.tlsCert), key: fs.readFileSync(config.tlsKey) }, handler)
     : http.createServer(handler);
@@ -20,7 +28,10 @@ function createServer() {
     req.expectContinue = true;
     handler(req, res);
   });
-  server.on('upgrade', handleUpgrade);
+  server.on('upgrade', (req, socket, head) => {
+    if (mount && req.url && mount.matches(req.url)) return mount.upgrade(req, socket, head);
+    return handleUpgrade(req, socket, head);
+  });
   server.on('clientError', (err, socket) => {
     if (!socket.writable || err.code === 'ECONNRESET') return socket.destroy();
     const status = err.code === 'HPE_HEADER_OVERFLOW' ? '431 Request Header Fields Too Large'
@@ -74,4 +85,4 @@ function start() {
 
 if (require.main === module) start();
 
-module.exports = { createServer, start };
+module.exports = { createServer, start, setMount };

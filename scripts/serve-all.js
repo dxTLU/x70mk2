@@ -16,6 +16,8 @@ proxy.start();
   try {
     const bridge = require('../scratch/bridge/server');
     const b = await bridge.start();
+    // Mount the bridge under /x70/ on the proxy's port, so it shares the proxy's origin.
+    try { proxy.setMount(require('./x70-mount').create(b.port)); } catch { /* mount optional */ }
     const stop = () => { try { b.close(); } catch { /* already closing */ } };
     process.on('SIGINT', stop);
     process.on('SIGTERM', stop);

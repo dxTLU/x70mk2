@@ -142,7 +142,10 @@ async function start(config = load(), { log = console.log } = {}) {
   const landingPage = (req) => {
     const host = esc(String(req.headers.host || `127.0.0.1:${boundPort}`));
     const proto = req.headers['x-forwarded-proto'] || (/^(127\.0\.0\.1|localhost|\[::1\])/.test(host) ? 'http' : 'https');
-    const base = `${proto}://${host}`;
+    // When reverse-proxied under a path (e.g. /x70), the mount sends x-forwarded-prefix so the
+    // page's own URLs resolve correctly; empty when the bridge is hit directly.
+    const prefix = esc(String(req.headers['x-forwarded-prefix'] || '').replace(/\/$/, ''));
+    const base = `${proto}://${host}${prefix}`;
     const builds = listBuilds();
     const buildsHtml = builds.length
       ? `<ul>${builds.map((f) => `<li><code>scratch/dist/${esc(f)}</code></li>`).join('')}</ul>`
@@ -180,11 +183,11 @@ a{color:var(--accent)}.foot{color:var(--mut);font-size:12px;margin-top:4px}</sty
 </ol>
 <h2>Built games (${builds.length})</h2>
 ${buildsHtml}
-<p class="foot">Live JSON: <a href="/health">/health</a> · Extension: <a href="/extension.js">/extension.js</a> · This page never shows your token.</p>
+<p class="foot">Live JSON: <a href="${prefix}/health">${prefix}/health</a> · Extension: <a href="${prefix}/extension.js">${prefix}/extension.js</a> · This page never shows your token.</p>
 </div>
 <script>
 const fmt=s=>{s=Math.floor(s);return s<60?s+"s":s<3600?Math.floor(s/60)+"m "+(s%60)+"s":Math.floor(s/3600)+"h "+Math.floor(s%3600/60)+"m"};
-async function tick(){try{const r=await fetch("/health",{cache:"no-store"});const j=await r.json();
+async function tick(){try{const r=await fetch("${prefix}/health",{cache:"no-store"});const j=await r.json();
 document.getElementById("kv").textContent=j.kv;document.getElementById("clients").textContent=j.clients;
 document.getElementById("uptime").textContent=fmt(j.uptime||0);
 document.getElementById("dot").classList.remove("off");document.getElementById("state").textContent="x70 Bridge is running";
