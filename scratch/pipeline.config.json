@@ -15,7 +15,14 @@
   "bridge": {
     "host": "127.0.0.1",
     "port": 7070,
-    "allowedOrigins": ["file://", "null", "tw-editor://.", "https://turbowarp.org", "http://localhost:8601"],
+    "allowedOrigins": [
+      "file://",
+      "null",
+      "tw-editor://.",
+      "https://turbowarp.org",
+      "http://localhost:8601"
+    ],
+    "allowedHostSuffixes": [],
     "fsRoots": {
       "data": "data/files",
       "assets": "assets"
@@ -25,9 +32,28 @@
       "timeoutMs": 30000,
       "maxOutputBytes": 4194304,
       "commands": {
-        "node-version": { "cmd": "node", "args": ["--version"] },
-        "git-status": { "cmd": "git", "args": ["status", "--short"] },
-        "echo": { "cmd": "node", "args": ["-e", "console.log(process.argv.slice(1).join(' '))", "--"], "extraArgs": true }
+        "node-version": {
+          "cmd": "node",
+          "args": [
+            "--version"
+          ]
+        },
+        "git-status": {
+          "cmd": "git",
+          "args": [
+            "status",
+            "--short"
+          ]
+        },
+        "echo": {
+          "cmd": "node",
+          "args": [
+            "-e",
+            "console.log(process.argv.slice(1).join(' '))",
+            "--"
+          ],
+          "extraArgs": true
+        }
       }
     }
   },
@@ -42,7 +68,11 @@
   "build": {
     "projectsDir": "projects",
     "outDir": "dist",
-    "targets": ["html", "electron-linux64", "electron-win64"],
+    "targets": [
+      "html",
+      "electron-linux64",
+      "electron-win64"
+    ],
     "extract": true,
     "appVersion": "1.0.0",
     "windowMode": "window",

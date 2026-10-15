@@ -14,7 +14,7 @@ function tempConfig() {
   const cfg = {
     runtime: { framerate: 0, interpolation: true, maxClones: 'Infinity', fencing: false, miscLimits: false },
     bridge: {
-      host: '127.0.0.1', port: 0, allowedOrigins: ['null'],
+      host: '127.0.0.1', port: 0, allowedOrigins: ['null'], allowedHostSuffixes: ['app.github.dev'],
       fsRoots: { data: 'data/files', assets: 'assets' }, maxFileBytes: 1048576,
       exec: { timeoutMs: 5000, maxOutputBytes: 65536, commands: { 'node-version': { cmd: process.execPath, args: ['--version'] } } },
     },
@@ -31,11 +31,12 @@ async function withBridge(fn) {
   const { dir, file } = tempConfig();
   const config = load(file);
   const bridge = await start(config, { log: () => {} });
-  const call = (method, params, { token = config.bridge.token, host = `127.0.0.1:${bridge.port}` } = {}) =>
+  const call = (method, params, { token = config.bridge.token, host = `127.0.0.1:${bridge.port}`, origin } = {}) =>
     new Promise((resolve, reject) => {
       const body = JSON.stringify({ method, params });
       const headers = { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Host: host, Connection: 'close' };
       if (token) headers.Authorization = `Bearer ${token}`;
+      if (origin) headers.Origin = origin;
       const req = http.request({ host: '127.0.0.1', port: bridge.port, path: '/rpc', method: 'POST', headers, agent: false },
         (r) => {
           let d = '';
@@ -90,6 +91,19 @@ test('missing or wrong token is rejected', () => withBridge(async ({ call }) => 
 
 test('a foreign Host header is rejected (DNS-rebinding guard)', () => withBridge(async ({ call }) => {
   assert.equal((await call('sys.ping', {}, { host: 'evil.example.com' })).status, 421);
+  // a look-alike of an allowed suffix must not slip past the dotted-boundary check
+  assert.equal((await call('sys.ping', {}, { host: 'evilapp.github.dev' })).status, 421);
+}));
+
+test('a forwarded-port Host/Origin (Codespaces) is accepted', () => withBridge(async ({ call }) => {
+  const host = 'glorious-space-7070.app.github.dev';
+  const ok = await call('sys.ping', {}, { host });
+  assert.equal(ok.status, 200);
+  assert.equal(typeof ok.body.result, 'number');
+  // the matching https Origin is allowed too
+  assert.equal((await call('sys.ping', {}, { host, origin: `https://${host}` })).status, 200);
+  // but a foreign Origin on that host is still refused
+  assert.equal((await call('sys.ping', {}, { host, origin: 'https://evil.example.com' })).status, 403);
 }));
 
 test('cache and list operations work on the in-memory fallback', () => withBridge(async ({ call }) => {

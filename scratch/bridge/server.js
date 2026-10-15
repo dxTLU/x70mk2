@@ -71,13 +71,27 @@ async function start(config = load(), { log = console.log } = {}) {
   }
 
   let boundPort = b.port;
+  // A dotted-suffix match (host === suf OR host endsWith "." + suf) so "evilapp.github.dev" is
+  // NOT accepted for the "app.github.dev" suffix — only real sub-hosts of it are.
+  const suffixOk = (host) => b.allowedHostSuffixes.some((suf) => host === suf || host.endsWith(`.${suf}`));
+  const isLoopback = (host) => host === '127.0.0.1' || host === 'localhost' || host === '::1' || host === '[::1]' || host === b.host;
   const hostOk = (req) => {
-    // Rejecting other Host values defeats DNS rebinding (evil.example resolving to 127.0.0.1).
+    // Rejecting unknown Host values defeats DNS rebinding (evil.example resolving to 127.0.0.1);
+    // loopback is always allowed, and a forwarded port (Codespaces/tunnel) is allowed by suffix.
     const h = String(req.headers.host || '').toLowerCase();
+    if (!h) return false;
     const p = String(boundPort);
-    return [`127.0.0.1:${p}`, `localhost:${p}`, `[::1]:${p}`, `${b.host}:${p}`].includes(h);
+    if ([`127.0.0.1:${p}`, `localhost:${p}`, `[::1]:${p}`, `${b.host}:${p}`].includes(h)) return true;
+    const hostname = h.replace(/:\d+$/, '');
+    return isLoopback(hostname) || suffixOk(hostname);
   };
-  const originOk = (origin) => !origin || b.allowedOrigins.includes('*') || b.allowedOrigins.includes(origin);
+  const originOk = (origin) => {
+    if (!origin) return true;
+    if (b.allowedOrigins.includes('*') || b.allowedOrigins.includes(origin)) return true;
+    let hostname;
+    try { hostname = new URL(origin).hostname.toLowerCase(); } catch { return false; }
+    return isLoopback(hostname) || suffixOk(hostname);
+  };
   const reqToken = (req, url) => {
     const auth = String(req.headers.authorization || '');
     if (auth.startsWith('Bearer ')) return auth.slice(7);

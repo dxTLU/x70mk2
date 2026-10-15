@@ -120,6 +120,10 @@ Everything lives in `pipeline.config.json`. Highlights:
 - `bridge.fsRoots` — the folders projects may read/write (`data`, `assets` by default).
 - `bridge.exec.commands` — the named commands projects may run (each is `{cmd, args}`; set
   `extraArgs: true` to allow appended arguments).
+- `bridge.allowedHostSuffixes` — host suffixes allowed in addition to loopback, so the bridge works
+  behind a forwarded port. The Codespaces forwarding domain (`app.github.dev`) is detected
+  automatically from the environment; add other tunnel domains here (matched on a dotted boundary,
+  so `app.github.dev` admits `x-7070.app.github.dev` but not `evilapp.github.dev`).
 - `redis.url` / `redis.required` — point at a Redis instance; `required: false` falls back to memory.
 - `build.targets` — e.g. `["html", "electron-linux64", "electron-win64"]`. `html` is the one you run
   in the browser; the `electron-*` targets are desktop `.zip` artifacts to download.

@@ -61,6 +61,13 @@ function load(file = process.env.X70_CONFIG || path.join(ROOT, 'pipeline.config.
     host: process.env.X70_BRIDGE_HOST || b.host || '127.0.0.1',
     port: num(process.env.X70_BRIDGE_PORT, num(b.port, 7070)),
     allowedOrigins: b.allowedOrigins || [],
+    // Host/Origin suffixes allowed in addition to loopback, so the bridge works behind a
+    // forwarded port (Codespaces, tunnels). The Codespaces forwarding domain is picked up
+    // automatically; add your own tunnel domains via bridge.allowedHostSuffixes.
+    allowedHostSuffixes: [
+      ...(b.allowedHostSuffixes || []),
+      ...(process.env.GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN ? [process.env.GITHUB_CODESPACES_PORT_FORWARDING_DOMAIN] : []),
+    ].map((s) => String(s).toLowerCase().replace(/^\.+/, '')).filter(Boolean),
     fsRoots,
     maxFileBytes: num(b.maxFileBytes, 256 * 1024 * 1024),
     exec: {

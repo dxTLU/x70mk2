@@ -344,8 +344,15 @@
     pair({ URL, TOKEN }) {
       const url = Cast.toString(URL).trim().replace(/\/$/, '');
       const token = Cast.toString(TOKEN).trim();
-      if (!/^https?:\/\/(127\.0\.0\.1|localhost|\[::1\])(:\d+)?$/.test(url)) {
-        lastError = 'The bridge URL must be a local address such as http://127.0.0.1:7070';
+      // Accept a loopback address (http or https) or any HTTPS URL — the latter covers a
+      // Codespaces forwarded port or a tunnel. Plaintext http to a non-loopback host is refused
+      // (insecure, and browsers block it as mixed content on an https page anyway).
+      let parsed;
+      try { parsed = new URL(url); } catch (e) { parsed = null; }
+      const loopback = parsed && /^(127\.0\.0\.1|localhost|\[?::1\]?)$/.test(parsed.hostname);
+      const ok = parsed && (parsed.protocol === 'https:' || (parsed.protocol === 'http:' && loopback));
+      if (!ok) {
+        lastError = 'The bridge URL must be http://127.0.0.1:7070 or an https:// address (e.g. your Codespaces forwarded port)';
         return;
       }
       if (socket) socket.close();
