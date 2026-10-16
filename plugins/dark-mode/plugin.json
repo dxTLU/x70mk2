@@ -1,0 +1,14 @@
+{
+  "name": "Dark mode",
+  "version": "1.0.0",
+  "description": "Darkens any site by inverting its colours (images and video keep theirs). Toggle per site from the toolbar.",
+  "main": null,
+  "client": "client.js",
+  "settings": {
+    "auto": { "type": "boolean", "label": "Dark by default", "description": "Start every site dark; the toolbar button still switches a site back.", "default": true, "public": true },
+    "brightness": { "type": "number", "label": "Brightness (%)", "default": 90, "min": 50, "max": 120, "step": 5, "public": true },
+    "contrast": { "type": "number", "label": "Contrast (%)", "default": 95, "min": 50, "max": 150, "step": 5, "public": true }
+  },
+  "toolbar": [{ "id": "toggle", "label": "🌙", "title": "Toggle dark mode for this site" }],
+  "sites": ["*"]
+}

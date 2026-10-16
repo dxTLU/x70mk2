@@ -13,6 +13,7 @@ function int(v, dflt) {
 }
 
 const env = process.env;
+const dataFile = env.DATA_FILE || path.join(__dirname, '..', 'data', 'sessions.json');
 
 module.exports = {
   host: env.HOST || '0.0.0.0',
@@ -31,7 +32,7 @@ module.exports = {
   // Upstream connect/header timeout in ms.
   upstreamTimeout: int(env.UPSTREAM_TIMEOUT, 30000),
   // Cookie jar persistence.
-  dataFile: env.DATA_FILE || path.join(__dirname, '..', 'data', 'sessions.json'),
+  dataFile,
   persistSessions: bool(env.PERSIST_SESSIONS, true),
   sessionTtlMs: int(env.SESSION_TTL_HOURS, 24 * 7) * 3600 * 1000,
   // Optional TLS for serving the proxy itself over HTTPS.
@@ -51,4 +52,15 @@ module.exports = {
   logRequests: bool(env.LOG_REQUESTS, false),
   // On SIGTERM/SIGINT: how long open streams, uploads and WebSockets may finish before exit.
   shutdownGraceMs: int(env.SHUTDOWN_GRACE_MS, 3000),
+  // Plugins: one folder per plugin under pluginsDir (see src/plugins.js and plugins/README.md).
+  pluginsEnabled: bool(env.PLUGINS_ENABLED, true),
+  pluginsDir: env.PLUGINS_DIR || path.join(__dirname, '..', 'plugins'),
+  // Plugin on/off state, settings and per-plugin storage. Defaults to next to the cookie jars.
+  pluginDataDir: env.PLUGIN_DATA_DIR || path.dirname(dataFile),
+  persistPlugins: bool(env.PERSIST_PLUGINS, true),
+  // Comma-separated plugin ids switched on at startup (in addition to the saved state).
+  plugins: (env.PLUGINS || '').split(',').map((s) => s.trim()).filter(Boolean),
+  // Whether /__proxy/plugins may change anything (off: the page is read-only).
+  pluginAdmin: bool(env.PLUGIN_ADMIN, true),
+  pluginHookTimeoutMs: int(env.PLUGIN_HOOK_TIMEOUT, 3000),
 };

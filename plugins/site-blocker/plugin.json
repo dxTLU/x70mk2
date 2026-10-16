@@ -1,0 +1,10 @@
+{
+  "name": "Site blocker",
+  "version": "1.0.0",
+  "description": "Blocks whole sites (and their subdomains) for everyone using the proxy, e.g. for a classroom or lab.",
+  "settings": {
+    "blocked": { "type": "text", "label": "Blocked sites", "description": "One domain per line; example.com also blocks www.example.com.", "default": "" },
+    "message": { "type": "string", "label": "Message shown", "default": "This site is blocked on this proxy." }
+  },
+  "sites": ["*"]
+}

@@ -14,11 +14,22 @@ const { rewriteCss } = require('./rewrite-css');
 const { rewriteScript } = require('./rewrite-js');
 const { SessionStore, siteOf, registrableDomain } = require('./cookies');
 const pages = require('./pages');
+const { PluginManager } = require('./plugins');
+const pluginAdmin = require('./plugin-admin');
 
 const SESSION_COOKIE = '__psid';
 const LAST_COOKIE = '__plast';
 
 const sessions = new SessionStore({ file: config.dataFile, persist: config.persistSessions, ttlMs: config.sessionTtlMs });
+
+const plugins = new PluginManager({
+  dir: config.pluginsDir,
+  dataDir: config.pluginDataDir,
+  persist: config.persistPlugins,
+  enable: config.plugins,
+  hookTimeoutMs: config.pluginHookTimeoutMs,
+  disabled: !config.pluginsEnabled,
+}).load();
 
 // ---- client runtime bundle ----------------------------------------------------------------
 
@@ -129,6 +140,8 @@ function isSecureRequest(req) {
 }
 
 function sessionFor(req, res) {
+  // Once per request: a fresh visitor must not be handed two different new sessions.
+  if (req._session) return req._session;
   const cookies = parseCookies(req.headers.cookie);
   let id = cookies[SESSION_COOKIE];
   if (!id || !/^[A-Za-z0-9_-]{16,64}$/.test(id)) {
@@ -139,7 +152,8 @@ function sessionFor(req, res) {
     }
   }
   req._cookies = cookies;
-  return { id, jar: sessions.get(id) };
+  req._session = { id, jar: sessions.get(id) };
+  return req._session;
 }
 
 function withNewCookies(res, headers) {
@@ -547,8 +561,13 @@ function requestHasBody(req) {
 
 const PX_ETAG = /^W\/"px([swl])([0-9a-f]{8})-(.*)"$/;
 
+/** The rewriter version, mixed with the plugin state (plugins can change rewritten bodies too). */
+function rewriteTag() {
+  return plugins.tag(clientBundle().rewriteVersion);
+}
+
 function versionEtag(etag, lastModified) {
-  const v = clientBundle().rewriteVersion;
+  const v = rewriteTag();
   if (etag) {
     const m = /^(W\/)?"(.*)"$/.exec(String(etag).trim());
     if (m) return `W/"px${m[1] ? 'w' : 's'}${v}-${m[2]}"`;
@@ -557,7 +576,7 @@ function versionEtag(etag, lastModified) {
 }
 
 function translateConditionals(h, method) {
-  const v = clientBundle().rewriteVersion;
+  const v = rewriteTag();
   const state = { versioned: false, stale: false };
   for (const name of ['if-none-match', 'if-match', 'if-range']) {
     // Only touch headers that carry one of our tags (If-Range may also hold a date).
@@ -841,7 +860,7 @@ function rewriteManifest(text, base) {
   return JSON.stringify(m);
 }
 
-function clientConfig(target, req, cookies) {
+function clientConfig(target, req, cookies, pluginInfo) {
   const cfg = {
     url: target.href,
     prefix: PREFIX,
@@ -850,12 +869,17 @@ function clientConfig(target, req, cookies) {
   };
   // document.cookie's first read is answered from here instead of a synchronous request.
   if (typeof cookies === 'string') cfg.cookies = cookies;
+  if (pluginInfo && pluginInfo.toolbar.length) cfg.pluginToolbar = pluginInfo.toolbar;
+  if (plugins.plugins.size) cfg.pluginsPage = '/__proxy/plugins';
   return cfg;
 }
 
-function injectionFor(target, req, cookies) {
-  const cfg = JSON.stringify(clientConfig(target, req, cookies)).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
-  return `<script data-proxy-runtime>window.__PROXY_CFG=${cfg};</script><script src="/__proxy/client.js?v=${clientBundle().version}" data-proxy-runtime></script>`;
+function injectionFor(target, req, cookies, topLevel = true) {
+  const pluginInfo = plugins.pageInfo(target, { topLevel, origin: publicOrigin(req) });
+  const cfg = JSON.stringify(clientConfig(target, req, cookies, pluginInfo)).replace(/</g, '\\u003c').replace(/\u2028/g, '\\u2028').replace(/\u2029/g, '\\u2029');
+  let out = `<script data-proxy-runtime>window.__PROXY_CFG=${cfg};</script><script src="/__proxy/client.js?v=${clientBundle().version}" data-proxy-runtime></script>`;
+  for (const src of pluginInfo.scripts) out += `<script src="${pages.esc(src)}" data-proxy-runtime data-x70-plugin></script>`;
+  return out;
 }
 
 function acceptsGzip(req) {
@@ -897,13 +921,64 @@ function proxyRequest(req, res, target) {
     return redirect(res, '/' + (target.pathname + target.search).replace(/^\/+/, ''));
   }
 
+  if (plugins.wants('onRequest', target)) return pluginRequest(req, res, target);
+  return forwardRequest(req, res, target, null);
+}
+
+/** Lets onRequest plugins block, redirect, retarget or re-header a request before it leaves. */
+async function pluginRequest(req, res, target) {
+  const { id } = sessionFor(req, res);
+  const ctx = requestContext(req, target);
+  const r = await plugins.runRequest({
+    url: target.href,
+    method: req.method,
+    dest: ctx.dest,
+    topLevel: ctx.topLevel,
+    initiator: ctx.initiator ? ctx.initiator.href : null,
+    requestHeaders: { ...req.headers },
+    session: id,
+  });
+  if (res.destroyed || res.headersSent) return;
+  if (r.block) {
+    if (req.readable) req.resume();
+    const b = r.block;
+    if (b.body !== null) return send(res, b.status, b.body, { 'content-type': b.contentType, 'cache-control': 'no-store', 'x-content-type-options': 'nosniff' });
+    if (ctx.topLevel || NAV_DESTS.has(ctx.dest)) {
+      return sendError(res, b.status, 'Blocked', `${b.plugin} blocked this request${b.reason ? `: ${b.reason}` : '.'}`, target.href);
+    }
+    return sendText(res, b.status, `Blocked by plugin ${b.plugin}`, { 'cache-control': 'no-store' });
+  }
+  if (r.redirect) {
+    let to;
+    try { to = new URL(r.redirect); } catch { to = null; }
+    if (to && /^(https?|wss?):$/.test(to.protocol)) {
+      if (req.readable) req.resume();
+      return redirect(res, PREFIX + to.href, 307);
+    }
+  }
+  let next = target;
+  if (r.url !== target.href) {
+    next = new URL(r.url);
+    if (next.host === selfHost(req)) return redirect(res, '/' + (next.pathname + next.search).replace(/^\/+/, ''));
+  }
+  return forwardRequest(req, res, next, r.touched ? r : null);
+}
+
+function forwardRequest(req, res, target, edits) {
   const { jar } = sessionFor(req, res);
   const ctx = requestContext(req, target);
   const cors = corsContext(req, ctx);
   const sendCookies = credentialsAllowed(req, cors);
   const headers = buildUpstreamHeaders(req, target, jar, { ctx, cors, sendCookies });
+  if (edits) {
+    for (const k of edits.removeHeaders) delete headers[k];
+    for (const [k, v] of Object.entries(edits.setHeaders)) {
+      if (k === 'host' || k === 'content-length' || k === 'transfer-encoding' || k === 'connection') continue;
+      headers[k] = headerSafe(v);
+    }
+  }
   const cond = translateConditionals(headers, req.method);
-  const st = { jar, ctx, cors, sendCookies, headers, cond, hasBody: requestHasBody(req) };
+  const st = { jar, ctx, cors, sendCookies, headers, cond, hasBody: requestHasBody(req), pluginTouched: Boolean(edits) };
 
   if (cors) {
     const unsafe = corsUnsafeHeaders(req);
@@ -1020,8 +1095,14 @@ function handleResponse(req, res, target, st, upRes) {
 
   const responseHeaders = (rewriting) => {
     const h = filterResponseHeaders(up, target, { rewriting, cors, versioned: st.cond.versioned, status });
+    if (plugins.wants('onResponseHeaders', target)) {
+      plugins.runResponseHeaders({ url: target.href, method: req.method, status, dest, headers: h, upstreamHeaders: { ...up } });
+      for (const k of Object.keys(h)) if (h[k] === undefined || h[k] === null) delete h[k];
+      st.pluginTouched = true;
+    }
     const shared = /\bpublic\b/i.test(up['cache-control'] || '');
-    if ((st.headers.cookie && !shared) || docCookies || cors) h['x-proxy-private'] = '1';
+    // A response a plugin shaped is never put in the shared cache: plugins change, caches stay.
+    if ((st.headers.cookie && !shared) || docCookies || cors || st.pluginTouched) h['x-proxy-private'] = '1';
     // The CORS decision depends on the requesting page, so caches must not reuse it for another.
     if (cors) addVary(h, 'Referer');
     if (/^text\/event-stream/i.test(up['content-type'] || '')) h['x-accel-buffering'] = 'no';
@@ -1130,6 +1211,11 @@ function bufferAndRewrite(req, res, target, st, upRes, kind, responseHeaders, do
       if (!looksLikeHtml(text)) return sendRaw(raw);
       k = 'html';
     }
+    if (k === 'html' || k === 'css' || k === 'js') {
+      const t = await plugins.transform(k, text, { url: target.href, dest: st.ctx.dest, status, contentType: up['content-type'] || '' });
+      if (res.destroyed) return;
+      if (t.touched) { text = t.text; st.pluginTouched = true; }
+    }
     let out;
     const ct = String(up['content-type'] || '').toLowerCase();
     try {
@@ -1138,7 +1224,7 @@ function bufferAndRewrite(req, res, target, st, upRes, kind, responseHeaders, do
       else if (k === 'manifest') out = rewriteManifest(text, target.href);
       else if (k === 'svg') out = rewriteHtml(text, target.href, { xml: true });
       else {
-        const inject = DOC_DESTS.has(st.ctx.dest || 'document') ? injectionFor(target, req, docCookies) : null;
+        const inject = DOC_DESTS.has(st.ctx.dest || 'document') ? injectionFor(target, req, docCookies, !st.ctx.dest || st.ctx.dest === 'document') : null;
         out = rewriteHtml(text, target.href, { inject, xml: /xhtml/.test(ct) });
       }
     } catch (e) {
@@ -1224,6 +1310,10 @@ function serveClient(req, res, url) {
 async function internalRoute(req, res, url) {
   const p = url.pathname;
   if (p === '/__proxy/client.js') return serveClient(req, res, url);
+  if (p === '/__proxy/plugins' || p.startsWith('/__proxy/plugins/')) {
+    return pluginAdmin.handle(req, res, url, { plugins, readBody, send, sendText, sendError, fromForeignPage, refererTarget, allowWrite: config.pluginAdmin });
+  }
+  if (p.startsWith('/__proxy/x/')) return pluginRoute(req, res, url);
   if (p === '/__proxy/home' || p === '/__proxy/') {
     return send(res, 200, pages.homePage(), { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff' });
   }
@@ -1263,6 +1353,33 @@ async function internalRoute(req, res, url) {
   return sendError(res, 404, 'Not found', 'Unknown proxy endpoint.');
 }
 
+/** /__proxy/x/<id>/<path>: a plugin's client script, or its own route handler. */
+async function pluginRoute(req, res, url) {
+  const m = /^\/__proxy\/x\/([a-z0-9][a-z0-9_-]{0,63})(\/.*)?$/.exec(url.pathname);
+  if (!m) return sendError(res, 404, 'Not found', 'Unknown plugin endpoint.');
+  const [, id, rest = '/'] = m;
+  if (rest === '/client.js') {
+    const js = plugins.clientScript(id, publicOrigin(req));
+    if (js === null) return sendText(res, 404, 'No such plugin script', { 'cache-control': 'no-store' });
+    return send(res, 200, js, { 'content-type': 'application/javascript; charset=utf-8', 'cache-control': 'no-cache', 'x-content-type-options': 'nosniff' });
+  }
+  const { id: session } = sessionFor(req, res);
+  const answered = await plugins.route(id, req, res, {
+    path: rest,
+    url,
+    query: Object.fromEntries(url.searchParams),
+    session,
+    // The page that called, when it was a proxied site (that site's code runs on our origin).
+    fromPage: refererTarget(req)?.href || null,
+    foreign: fromForeignPage(req),
+    readBody: (limit) => readBody(req, limit),
+    readJson: async (limit) => JSON.parse((await readBody(req, limit)) || 'null'),
+    send: (status, body, headers = {}) => send(res, status, body, { 'cache-control': 'no-store', ...headers }),
+    json: (value, status = 200) => send(res, status, JSON.stringify(value), { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' }),
+  });
+  if (!answered) return sendError(res, 404, 'Not found', `The plugin "${id}" is not running or has no pages.`);
+}
+
 function health(req, res) {
   // Answered before the BASIC_AUTH gate so load balancers and the Varnish probe can reach it.
   const body = config.basicAuth ? { ok: true } : { ok: true, sessions: sessions.jars.size, uptime: process.uptime() };
@@ -1285,7 +1402,7 @@ async function handle(req, res) {
       if (/^\/p\/https?:\/\/[^/?#]+(?:[?#].*)?$/i.test(raw) && (req.method === 'GET' || req.method === 'HEAD')) {
         return redirect(res, PREFIX + target.href, 301);
       }
-      return proxyRequest(req, res, target);
+      return await proxyRequest(req, res, target);
     }
 
     // Everything below answers locally; let a client waiting on 100-continue send its body.
@@ -1327,7 +1444,7 @@ async function handle(req, res) {
 }
 
 module.exports = {
-  handle, sessions, sessionFor, buildUpstreamHeaders, refererTarget, publicOrigin, selfHost, requestContext,
+  handle, sessions, plugins, sessionFor, buildUpstreamHeaders, refererTarget, publicOrigin, selfHost, requestContext,
   normaliseInput, parseCookies, authorized, isProxyAuth, clientBundle, rewriteLinkHeader, rewriteRefresh,
   corsUnsafeHeaders, corsCheck, preflightCache, SESSION_COOKIE, LAST_COOKIE,
 };

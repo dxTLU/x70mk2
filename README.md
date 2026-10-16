@@ -20,6 +20,7 @@ VCL, `varnish/default.vcl`) caches static assets for everyone and streams everyt
 - [Using it](#using-it)
 - [Running on a remote lab VM or VCL reservation](#running-on-a-remote-lab-vm-or-vcl-reservation)
 - [Configuration](#configuration)
+- [Plugins](#plugins)
 - [How it works](#how-it-works)
 - [Limitations](#limitations)
 - [Troubleshooting](#troubleshooting)
@@ -81,8 +82,10 @@ app container's network so only Varnish's port is published.
 - **Settings** (gear button, saved in your browser): search engine (DuckDuckGo by default,
   Google, Bing, Brave Search, Startpage), open sites in a new tab, remember recent sites, and
   light/dark/system appearance. Without JavaScript the server searches with `SEARCH_URL`.
-- **Toolbar**: proxied pages get a small floating widget (back, forward, reload, address, home).
-  Turn it off for everyone with `TOOLBAR=0`.
+- **Toolbar**: proxied pages get a small floating widget (back, forward, reload, address, home,
+  plugin buttons). Turn it off for everyone with `TOOLBAR=0`.
+- **Plugins**: `http://<server>/__proxy/plugins` (puzzle button on the toolbar) switches plugins
+  on and off, edits their settings and limits them to sites. See [Plugins](#plugins).
 - **Sign out everywhere** on the home page deletes every cookie the proxy stores for your session.
 - Press <kbd>/</kbd> on the home page to jump to the address box.
 
@@ -156,6 +159,13 @@ Everything is set with environment variables (`src/config.js`); none is required
 | `SHUTDOWN_GRACE_MS` | `3000` | On SIGTERM/SIGINT, how long open streams and WebSockets may finish. |
 | `LOG_REQUESTS` | `0` | Log every request with status and timing. |
 | `NODE_EXTRA_CA_CERTS` | (none) | Node.js: extra CA certificates to trust (internal sites, TLS-inspecting networks). |
+| `PLUGINS_ENABLED` | `1` | `0` ignores every plugin. |
+| `PLUGINS_DIR` | `plugins/` | Folder with one sub-folder per plugin. |
+| `PLUGINS` | (none) | Comma-separated plugin ids to switch on at startup, on top of the saved state. |
+| `PLUGIN_DATA_DIR` | folder of `DATA_FILE` | Where `plugins.json` (on/off, settings, sites) and each plugin's storage are saved. |
+| `PERSIST_PLUGINS` | `1` | Save plugin state and storage to disk. |
+| `PLUGIN_ADMIN` | `1` | `0` makes `/__proxy/plugins` read-only. |
+| `PLUGIN_HOOK_TIMEOUT` | `3000` | Milliseconds a plugin hook may take before it is skipped (and counted as a failure). |
 
 `scripts/start.sh` also reads:
 
@@ -167,6 +177,30 @@ Everything is set with environment variables (`src/config.js`); none is required
 | `VARNISH_WORKDIR` | `/var/lib/varnish/x70mk2-proxy` as root, else `data/varnish` | `varnishd -n` directory (use it with `varnishadm -n` and `varnishlog -n`). |
 | `VARNISH_PROXY_PORT` | (off) | Also accept the PROXY protocol on `127.0.0.1:<port>`, for a local TLS terminator. |
 | `NO_VARNISH` | `0` | `1` runs the app alone. |
+
+## Plugins
+
+Plugins add features without touching the proxy's code. Each one is a folder in `plugins/` with a
+`plugin.json` manifest and, optionally, server hooks (`index.js`) and a script that runs in
+proxied pages (`client.js`). Three ship with the proxy, switched off:
+
+| Plugin | What it does |
+| --- | --- |
+| `dark-mode` | Darkens every site; 🌙 on the toolbar switches a site back. Brightness and contrast settings. |
+| `request-log` | Logs the requests of your browser session; 📜 on the toolbar opens the log. |
+| `site-blocker` | Blocks listed domains (and subdomains) for everyone. |
+
+Open `/__proxy/plugins` to switch them on, change settings or limit them to some sites
+(`example.com`, `!ads.example.com`, `*`). Changes apply to the next page load and are saved in
+`plugins.json` next to the cookie jars. After adding or editing plugin files press **Reload from
+disk**, send the process `SIGHUP`, or run `systemctl reload x70mk2-proxy`.
+
+A plugin that keeps failing (5 errors or timeouts in a row) is switched off and the error is
+shown on the manager page. Plugins are ordinary Node.js code running inside the proxy: only
+install ones you have read. Every proxied site shares the proxy's origin, so on a shared proxy set
+`BASIC_AUTH` (or `PLUGIN_ADMIN=0` to lock the manager page).
+
+[plugins/README.md](plugins/README.md) explains how to write one.
 
 ## How it works
 

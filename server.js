@@ -56,6 +56,7 @@ function start() {
     clearInterval(maintenance);
     // Persist cookie jars first: everything after this point is best effort.
     proxy.sessions.save();
+    proxy.plugins.flush();
     if (config.logRequests) console.log(`[proxy] ${signal}: shutting down`);
     server.close(() => process.exit(0));
     server.closeIdleConnections?.();
@@ -67,6 +68,13 @@ function start() {
   };
   process.on('SIGINT', () => shutdown('SIGINT'));
   process.on('SIGTERM', () => shutdown('SIGTERM'));
+  // SIGHUP re-reads the plugins folder (also: "Reload from disk" on /__proxy/plugins).
+  if (process.platform !== 'win32') {
+    process.on('SIGHUP', () => {
+      proxy.plugins.reload();
+      console.log(`[proxy] plugins reloaded: ${proxy.plugins.list().filter((p) => p.running).map((p) => p.id).join(', ') || 'none running'}`);
+    });
+  }
   // Last resort: all state is per request, so one failure must not take every user's session
   // down with it (request handlers already turn their own errors into error pages).
   process.on('uncaughtException', (e) => console.error('[proxy] uncaught exception', e));

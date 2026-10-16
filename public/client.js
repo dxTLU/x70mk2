@@ -1912,6 +1912,8 @@
       'input{all:unset;width:min(52vw,420px);padding:5px 8px;border-radius:8px;background:#0f1115;color:#e8eaf0;border:1px solid #2a2f3a;font:12px ui-monospace,SFMono-Regular,Menlo,monospace;box-sizing:border-box}' +
       'input:focus{border-color:#748ffc}' +
       'svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}' +
+      '.plug{display:contents}' +
+      '.plug .pb{width:auto;min-width:28px;padding:0 4px;box-sizing:border-box;font:14px/1 system-ui,-apple-system,"Segoe UI",sans-serif}' +
       '</style>' +
       '<div class="wrap' + (hidden ? ' min' : '') + '">' +
       '<button class="toggle" title="Proxy controls" aria-label="Toggle proxy controls"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3c3 3 4 6 4 9s-1 6-4 9c-3-3-4-6-4-9s1-6 4-9z"/></svg></button>' +
@@ -1921,6 +1923,7 @@
       '<button class="reload" title="Reload" aria-label="Reload"><svg viewBox="0 0 24 24"><path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/></svg></button>' +
       '<input class="addr" spellcheck="false" autocomplete="off" aria-label="Address">' +
       '<button class="home" title="Proxy home" aria-label="Proxy home"><svg viewBox="0 0 24 24"><path d="M3 11l9-7 9 7v9a1 1 0 0 1-1 1h-5v-6H9v6H4a1 1 0 0 1-1-1z"/></svg></button>' +
+      '<span class="plug"></span>' +
       '</span></div>';
     var wrap = root.querySelector('.wrap');
     toolbarInput = root.querySelector('.addr');
@@ -1933,6 +1936,7 @@
     root.querySelector('.fwd').addEventListener('click', function () { history.forward(); });
     root.querySelector('.reload').addEventListener('click', function () { G.location.reload(); });
     root.querySelector('.home').addEventListener('click', function () { G.location.href = '/__proxy/home'; });
+    buildPluginButtons(root.querySelector('.plug'));
     toolbarInput.addEventListener('keydown', function (e) {
       e.stopPropagation();
       if (e.key === 'Enter') {
@@ -1943,6 +1947,39 @@
     ['keyup', 'keypress', 'input'].forEach(function (t) { toolbarInput.addEventListener(t, function (e) { e.stopPropagation(); }); });
     toolbarInput.addEventListener('focus', function () { toolbarInput.select(); });
     document.documentElement.appendChild(toolbarHost);
+  }
+
+  /** Toolbar buttons that plugins declare; a click navigates or fires 'x70:toolbar' on window. */
+  function buildPluginButtons(host) {
+    var items = Array.isArray(cfg.pluginToolbar) ? cfg.pluginToolbar : [];
+    items.forEach(function (it) {
+      if (!it || typeof it !== 'object') return;
+      var b = document.createElement('button');
+      b.className = 'pb';
+      b.textContent = String(it.label || '').slice(0, 4);
+      b.title = String(it.title || it.label || '');
+      b.setAttribute('aria-label', b.title);
+      b.addEventListener('click', function () {
+        if (it.href) {
+          var h = String(it.href);
+          G.location.href = h.lastIndexOf('/__proxy/', 0) === 0 ? h : '/__proxy/go?url=' + encodeURIComponent(h);
+          return;
+        }
+        var ev;
+        try { ev = new CustomEvent('x70:toolbar', { detail: { plugin: it.plugin, action: it.action } }); } catch (e) { return; }
+        G.dispatchEvent(ev);
+      });
+      host.appendChild(b);
+    });
+    if (cfg.pluginsPage) {
+      var m = document.createElement('button');
+      m.className = 'plugins';
+      m.title = 'Plugins';
+      m.setAttribute('aria-label', 'Plugins');
+      m.innerHTML = '<svg viewBox="0 0 24 24"><path d="M10 3h4v3a2 2 0 1 0 4 0V3h3v7h-3a2 2 0 1 0 0 4h3v7h-7v-3a2 2 0 1 0-4 0v3H3v-7h3a2 2 0 1 0 0-4H3V3z"/></svg>';
+      m.addEventListener('click', function () { G.location.href = String(cfg.pluginsPage); });
+      host.appendChild(m);
+    }
   }
 
   // --- per-document setup -------------------------------------------------------------------

@@ -1,0 +1,11 @@
+{
+  "name": "Request log",
+  "version": "1.0.0",
+  "description": "Records the requests your browser session makes through the proxy, with a live page to inspect them.",
+  "settings": {
+    "max": { "type": "number", "label": "Requests kept per session", "default": 300, "min": 10, "max": 5000 },
+    "documentsOnly": { "type": "boolean", "label": "Only log page loads", "default": false }
+  },
+  "toolbar": [{ "id": "open", "label": "📜", "title": "Request log", "href": "/__proxy/x/request-log/" }],
+  "sites": ["*"]
+}

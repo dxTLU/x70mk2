@@ -32,6 +32,9 @@ if [[ "$SRC" != "$PREFIX" ]]; then
     rm -rf "${PREFIX:?}/$item"
     cp -a "$SRC/$item" "$PREFIX/$item"
   done
+  # Plugins are merged, not replaced: ones installed on the server stay.
+  mkdir -p "$PREFIX/plugins"
+  cp -a "$SRC/plugins/." "$PREFIX/plugins/"
   for item in server.js package.json README.md; do
     [[ -e "$SRC/$item" ]] && cp -a "$SRC/$item" "$PREFIX/$item"
   done

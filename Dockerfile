@@ -15,6 +15,7 @@ WORKDIR /app
 COPY package.json server.js ./
 COPY src ./src
 COPY public ./public
+COPY plugins ./plugins
 COPY scripts/urls.js ./scripts/urls.js
 
 # Cookie jars persist in a volume, owned by the unprivileged "node" user of the base image.

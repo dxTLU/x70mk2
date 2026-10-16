@@ -129,4 +129,4 @@ function errorPage(status, title, detail, targetUrl, opts = {}) {
 
 const FAVICON = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><circle cx="16" cy="16" r="13" fill="none" stroke="#3b5bdb" stroke-width="3"/><path d="M3 16h26M16 3c4 4 5.5 8.5 5.5 13S20 25 16 29c-4-4-5.5-8.5-5.5-13S12 7 16 3z" fill="none" stroke="#3b5bdb" stroke-width="3"/></svg>');
 
-module.exports = { homePage, errorPage, hintFor, FAVICON };
+module.exports = { homePage, errorPage, hintFor, esc, FAVICON };
